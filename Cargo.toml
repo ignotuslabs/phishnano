@@ -1,0 +1,35 @@
+[package]
+name = "phishnano"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight phishing URL detection library with embedded ML model"
+license = "MIT"
+repository = "https://github.com/ignotuslabs/phishnano"
+homepage = "https://github.com/ignotuslabs/phishnano"
+keywords = ["phishing", "security", "url", "detection", "ml"]
+categories = ["security"]
+readme = "README.md"
+include = ["src/**", "resources/**", "README.md", "LICENSE"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+murmurhash3 = "0.0.5"
+regex = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+lazy_static = "1.4"
+
+[dev-dependencies]
+log = "0.4"
+env_logger = "0.10"
+
+[workspace]
+members = ["phishnano-cli"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

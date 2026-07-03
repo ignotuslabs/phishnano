@@ -1,0 +1,31 @@
+# Training data and scripts (not tracked in git)
+training/
+train-data/
+train-data.zip
+*.zip
+
+# Rust build artifacts
+target/
+rust/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+*.swo
+
+# IDE
+.idea/
+
+# Backup model files (kept locally, not in repo)
+resources/model_data_*.bincode
+resources/model_data_*.json
