@@ -100,7 +100,7 @@ checksum = "a2983372caf4480544083767bf2d27defafe32af49ab4df3a0b7fc90793a3664"
 
 [[package]]
 name = "phishnano"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -112,14 +112,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "phishnano-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "phishnano",
 ]
 
 [[package]]

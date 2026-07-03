@@ -32,13 +32,13 @@ use std::process;
 fn print_usage() {
     eprintln!("Usage: phishnano-cli <URL> [--threshold <value>]");
     eprintln!("       phishnano-cli --convert <json_path> <bincode_path>");
-    eprintln!("");
+    eprintln!();
     eprintln!("Arguments:");
     eprintln!("  <URL>             URL to analyze");
     eprintln!("  --threshold <v>   Classification threshold (default: 0.50)");
     eprintln!("  --convert <json> <bin>  Convert JSON model to bincode format");
     eprintln!("  --model <path>    Load model from file instead of embedded default");
-    eprintln!("");
+    eprintln!();
     eprintln!("Classification:");
     eprintln!("  score >= threshold: Phishing");
     eprintln!("  score < threshold:  Normal");
