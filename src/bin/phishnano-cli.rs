@@ -7,6 +7,7 @@
 //!    phishnano-cli "http://suspicious-url.com"
 //!    phishnano-cli "http://example.com" --threshold 0.40
 //!    phishnano-cli "http://example.com" --model custom_model.bincode
+//!    phishnano-cli "http://suspicious.com/login" --detailed
 //!    ```
 //!
 //! 2. **Convert mode** (`--convert`): Convert a JSON model to bincode format
@@ -22,20 +23,31 @@
 //! classified as "Phishing"; otherwise "Normal". Lower the threshold
 //! for higher phishing recall (at the cost of more false positives);
 //! raise it for fewer false positives (at the cost of missing some phishing).
+//!
+//! ## Detailed Mode
+//!
+//! Use `--detailed` to output risk indicators explaining why a URL was
+//! classified as phishing or normal. Indicators come from two sources:
+//! model decision tracing (which features the Random Forest used) and
+//! heuristic rules (abnormal feature values).
 
 use anyhow::Context;
-use phishnano::{convert_json_to_bincode, load_default_model, load_model_from_path, predict_url};
+use phishnano::{
+    convert_json_to_bincode, load_default_model, load_model_from_path, predict_url,
+    predict_url_detailed, IndicatorSource,
+};
 use std::env;
 use std::process;
 
 /// Print usage information to stderr.
 fn print_usage() {
-    eprintln!("Usage: phishnano-cli <URL> [--threshold <value>]");
+    eprintln!("Usage: phishnano-cli <URL> [--threshold <value>] [--detailed]");
     eprintln!("       phishnano-cli --convert <json_path> <bincode_path>");
     eprintln!();
     eprintln!("Arguments:");
     eprintln!("  <URL>             URL to analyze");
-    eprintln!("  --threshold <v>   Classification threshold (default: 0.50)");
+    eprintln!("  --threshold <v>   Classification threshold (default: 0.45)");
+    eprintln!("  --detailed        Show risk indicators explaining the score");
     eprintln!("  --convert <json> <bin>  Convert JSON model to bincode format");
     eprintln!("  --model <path>    Load model from file instead of embedded default");
     eprintln!();
@@ -99,9 +111,10 @@ fn main() {
     // The first positional argument is the URL to analyze.
     let url = &args[1];
 
-    // Parse optional flags: --threshold and --model.
+    // Parse optional flags: --threshold, --model, --detailed.
     let mut threshold = 0.45;
     let mut model_path: Option<String> = None;
+    let mut detailed = false;
 
     let mut i = 2;
     while i < args.len() {
@@ -114,6 +127,9 @@ fn main() {
         } else if args[i] == "--model" && i + 1 < args.len() {
             model_path = Some(args[i + 1].clone());
             i += 2;
+        } else if args[i] == "--detailed" {
+            detailed = true;
+            i += 1;
         } else {
             i += 1;
         }
@@ -132,13 +148,40 @@ fn main() {
     });
 
     // Run inference and display the result.
-    let score = predict_url(url, &model);
-    let classification = if score >= threshold {
-        "Phishing"
-    } else {
-        "Normal"
-    };
+    if detailed {
+        let result = predict_url_detailed(url, &model);
+        let classification = if result.score >= threshold {
+            "Phishing"
+        } else {
+            "Normal"
+        };
 
-    println!("Score: {:.4}", score);
-    println!("Classification: {}", classification);
+        println!("Score: {:.4}", result.score);
+        println!("Classification: {}", classification);
+
+        if !result.indicators.is_empty() {
+            println!();
+            println!("Risk Indicators ({}):", result.indicators.len());
+            for (i, ind) in result.indicators.iter().enumerate() {
+                let source_tag = match &ind.source {
+                    IndicatorSource::Model {
+                        tree_count,
+                        total_trees,
+                    } => format!("Model, {}/{} trees", tree_count, total_trees),
+                    IndicatorSource::Heuristic => "Heuristic".to_string(),
+                };
+                println!("  {}. [{}] {}", i + 1, source_tag, ind.description);
+            }
+        }
+    } else {
+        let score = predict_url(url, &model);
+        let classification = if score >= threshold {
+            "Phishing"
+        } else {
+            "Normal"
+        };
+
+        println!("Score: {:.4}", score);
+        println!("Classification: {}", classification);
+    }
 }

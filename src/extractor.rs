@@ -6,10 +6,10 @@
 //!
 //! 1. **Character n-gram hash features** (indices 0 to `n_features - 1`):
 //!    The URL is cleaned (protocol stripped, lowercased, digits normalized
-//!    to "0"), then character n-grams of length 2-3 are extracted. Each
-//!    n-gram is hashed using MurmurHash3 and mapped to a feature index via
-//!    modulo operation. The count at each index represents how many n-grams
-//!    hashed to that bucket.
+//!    to "0"), then character n-grams are extracted. Each n-gram is hashed
+//!    using MurmurHash3 and mapped to a feature index via modulo operation.
+//!    The count at each index represents how many n-grams hashed to that
+//!    bucket.
 //!
 //! 2. **Manual engineered features** (indices `n_features` to
 //!    `n_features + n_manual_features - 1`):
@@ -23,20 +23,86 @@
 //! implementation in `training/scripts/train.py`. Any divergence will cause
 //! the Rust inference results to differ from the Python training metrics.
 
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::OnceLock;
 
-lazy_static! {
-    /// Matches the HTTP or HTTPS protocol prefix (e.g., "http://", "https://").
-    static ref PROTOCOL_REGEX: Regex = Regex::new(r"^https?://").unwrap();
+/// Returns a static reference to the protocol-stripping regex.
+///
+/// Matches `http://` or `https://` at the start of the URL string.
+fn protocol_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^https?://").unwrap())
+}
 
-    /// Matches any single digit character (0-9) for digit normalization.
-    static ref DIGIT_REGEX: Regex = Regex::new(r"\d").unwrap();
+/// Returns a static reference to the digit-matching regex.
+///
+/// Matches any single digit character (0-9) for digit normalization.
+fn digit_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\d").unwrap())
+}
 
-    /// Matches IPv4 address patterns in the domain portion of a URL.
-    /// Used to detect URLs that use raw IP addresses instead of domain names,
-    /// which is a common phishing indicator.
-    static ref IP_REGEX: Regex = Regex::new(r"^\d+\.\d+\.\d+\.\d+").unwrap();
+/// Returns a static reference to the IPv4-matching regex.
+///
+/// Matches raw IPv4 address patterns at the start of the domain portion.
+fn ip_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\d+\.\d+\.\d+\.\d+").unwrap())
+}
+
+/// MurmurHash3 x86 32-bit hash function.
+///
+/// Self-contained implementation of the MurmurHash3 algorithm (variant:
+/// x86_32), compatible with the reference implementation by Austin Appleby.
+/// Produces identical results to Python's `sklearn.utils.murmurhash3_32`
+/// for the same input and seed.
+fn murmurhash3_x86_32(data: &[u8], seed: u32) -> u32 {
+    const C1: u32 = 0xcc9e2d51;
+    const C2: u32 = 0x1b873593;
+
+    let mut h1 = seed;
+    let nblocks = data.len() / 4;
+
+    for i in 0..nblocks {
+        let k1 = u32::from_le_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ]);
+        let mut k1 = k1.wrapping_mul(C1);
+        k1 = k1.rotate_left(15);
+        k1 = k1.wrapping_mul(C2);
+
+        h1 ^= k1;
+        h1 = h1.rotate_left(13);
+        h1 = h1.wrapping_mul(5).wrapping_add(0xe6546b64);
+    }
+
+    let tail = &data[nblocks * 4..];
+    let mut k1: u32 = 0;
+    if tail.len() >= 3 {
+        k1 ^= (tail[2] as u32) << 16;
+    }
+    if tail.len() >= 2 {
+        k1 ^= (tail[1] as u32) << 8;
+    }
+    if !tail.is_empty() {
+        k1 ^= tail[0] as u32;
+        k1 = k1.wrapping_mul(C1);
+        k1 = k1.rotate_left(15);
+        k1 = k1.wrapping_mul(C2);
+        h1 ^= k1;
+    }
+
+    h1 ^= data.len() as u32;
+    h1 ^= h1 >> 16;
+    h1 = h1.wrapping_mul(0x85ebca6b);
+    h1 ^= h1 >> 13;
+    h1 = h1.wrapping_mul(0xc2b2ae35);
+    h1 ^= h1 >> 16;
+
+    h1
 }
 
 /// Extract the complete feature vector from a URL.
@@ -53,6 +119,7 @@ lazy_static! {
 /// - `url`: The raw URL string to analyze
 /// - `n_features`: Number of n-gram hash buckets (typically 500)
 /// - `n_manual_features`: Number of manual features (typically 19)
+/// - `ngram_range`: Character n-gram range `[min, max]` (typically `[2, 3]`)
 ///
 /// # Returns
 ///
@@ -66,7 +133,7 @@ lazy_static! {
 /// # N-gram Extraction Process
 ///
 /// 1. The URL is cleaned via [`clean_url`] (strip protocol, lowercase, normalize digits)
-/// 2. For each n in [2, 3], all character n-grams are extracted
+/// 2. For each n in `[ngram_range[0], ngram_range[1]]`, all character n-grams are extracted
 /// 3. Each n-gram is hashed with MurmurHash3 (seed=0)
 /// 4. The hash is mapped to a bucket via `hash % n_features`
 /// 5. The count at each bucket is incremented
@@ -80,26 +147,31 @@ lazy_static! {
 /// ```
 /// use phishnano::extract_features;
 ///
-/// let features = extract_features("https://example.com/login", 500, 19);
+/// let features = extract_features("https://example.com/login", 500, 19, [2, 3]);
 /// assert_eq!(features.len(), 519);
 /// ```
-pub fn extract_features(url: &str, n_features: usize, n_manual_features: usize) -> Vec<f32> {
+pub fn extract_features(
+    url: &str,
+    n_features: usize,
+    n_manual_features: usize,
+    ngram_range: [usize; 2],
+) -> Vec<f32> {
     let cleaned = clean_url(url);
     let chars: Vec<char> = cleaned.chars().collect();
     let mut features = vec![0.0; n_features + n_manual_features];
 
-    // Extract character n-grams of length 2 and 3, hash each one, and
-    // increment the count at the corresponding bucket index.
-    for n in 2..=3 {
-        for i in 0..=(chars.len() as i32 - n) {
-            let gram: String = chars[i as usize..(i + n) as usize].iter().collect();
-            let hash = murmurhash3::murmurhash3_x86_32(gram.as_bytes(), 0) as usize;
+    for n in ngram_range[0]..=ngram_range[1] {
+        if n == 0 || n > chars.len() {
+            continue;
+        }
+        for i in 0..=(chars.len() - n) {
+            let gram: String = chars[i..i + n].iter().collect();
+            let hash = murmurhash3_x86_32(gram.as_bytes(), 0) as usize;
             let idx = hash % n_features;
             features[idx] += 1.0;
         }
     }
 
-    // Append the 19 manual engineered features after the n-gram features.
     let manual_features = extract_manual_features(url);
     for (i, &val) in manual_features.iter().enumerate() {
         if i < n_manual_features {
@@ -147,6 +219,15 @@ pub fn extract_features(url: &str, n_features: usize, n_manual_features: usize) 
 /// `update`, `bank`, `paypal`, `facebook`, `google`, `apple`,
 /// `amazon`, `ebay`, `microsoft`, `yahoo`, `linkedin`
 ///
+/// # Known Limitations
+///
+/// - Sensitive words use substring matching (`contains`), which can produce
+///   false positives (e.g., "pineapple" matches "apple"). This is consistent
+///   with the Python training pipeline and the impact is diluted by the
+///   519-dimensional feature vector.
+/// - No percent-encoding or Punycode decoding is performed. This is a
+///   known limitation shared with the Python training pipeline.
+///
 /// # Arguments
 ///
 /// - `url`: The raw URL string to analyze
@@ -168,7 +249,6 @@ pub fn extract_features(url: &str, n_features: usize, n_manual_features: usize) 
 pub fn extract_manual_features(url: &str) -> Vec<f32> {
     let url_lower = url.to_lowercase();
 
-    // Protocol detection: HTTP is insecure and commonly used in phishing.
     let has_http = if url_lower.starts_with("http://") {
         1.0
     } else {
@@ -180,56 +260,47 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
         0.0
     };
 
-    // Strip protocol prefix for structural analysis.
-    let url_clean = PROTOCOL_REGEX.replace_all(&url_lower, "");
+    let url_clean = protocol_regex().replace(&url_lower, "");
     let url_clean_str = url_clean.as_ref();
 
-    // URL length bucketing: phishing URLs tend to be longer due to
-    // embedded paths, subdomains, and tracking parameters.
-    let url_len = url_clean_str.len();
-    let url_len_bucket = if url_len < 30 {
+    let url_char_count = url_clean_str.chars().count();
+    let url_len_bucket = if url_char_count < 30 {
         1.0
-    } else if url_len < 60 {
+    } else if url_char_count < 60 {
         2.0
-    } else if url_len < 100 {
+    } else if url_char_count < 100 {
         3.0
-    } else if url_len < 150 {
+    } else if url_char_count < 150 {
         4.0
     } else {
         5.0
     };
 
-    // Split domain and path at the first '/' character.
     let (domain, path) = match url_clean_str.find('/') {
         Some(pos) => (&url_clean_str[..pos], &url_clean_str[pos..]),
         None => (url_clean_str, ""),
     };
 
-    // Domain length bucketing: unusually long domains may indicate
-    // phishing (e.g., "account-verify-security-update.example.com").
-    let domain_len = domain.len();
-    let domain_len_bucket = if domain_len < 8 {
+    let domain_char_count = domain.chars().count();
+    let domain_len_bucket = if domain_char_count < 8 {
         1.0
-    } else if domain_len < 15 {
+    } else if domain_char_count < 15 {
         2.0
-    } else if domain_len < 25 {
+    } else if domain_char_count < 25 {
         3.0
     } else {
         4.0
     };
 
-    // IP address detection: legitimate websites use domain names, not
-    // raw IP addresses. Phishing URLs sometimes use IPs to evade
-    // domain-based blocklists.
-    let has_ip = if IP_REGEX.is_match(domain) { 1.0 } else { 0.0 };
+    let has_ip = if ip_regex().is_match(domain) {
+        1.0
+    } else {
+        0.0
+    };
 
-    // Subdomain count: excessive subdomains (e.g., "a.b.c.d.e.com")
-    // can indicate phishing attempts to mimic legitimate domains.
     let num_subdomains = domain.chars().filter(|&c| c == '.').count();
     let num_subdomains = std::cmp::min(num_subdomains, 5) as f32;
 
-    // Special character counts: phishing URLs often contain unusual
-    // characters for obfuscation, tracking, or parameter injection.
     let num_dots = url_clean_str.chars().filter(|&c| c == '.').count() as f32;
     let num_hyphens = url_clean_str.chars().filter(|&c| c == '-').count() as f32;
     let num_underscores = url_clean_str.chars().filter(|&c| c == '_').count() as f32;
@@ -239,31 +310,25 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
     let num_qmark = url_clean_str.chars().filter(|&c| c == '?').count() as f32;
     let num_and = url_clean_str.chars().filter(|&c| c == '&').count() as f32;
 
-    // Digit ratio: phishing URLs often contain random digits or
-    // numeric identifiers (e.g., "account123.verify456.com").
     let num_digits = url_clean_str
         .chars()
         .filter(|&c| c.is_ascii_digit())
         .count() as f32;
-    let digit_ratio = num_digits / url_clean_str.len().max(1) as f32;
+    let digit_ratio = num_digits / url_char_count.max(1) as f32;
 
-    // Path length bucketing: long paths with many segments can indicate
-    // phishing (e.g., "/login/verify/account/update/confirm").
-    let path_len = path.len();
-    let path_len_bucket = if path_len == 0 {
+    let path_char_count = path.chars().count();
+    let path_len_bucket = if path_char_count == 0 {
         1.0
-    } else if path_len < 20 {
+    } else if path_char_count < 20 {
         2.0
-    } else if path_len < 50 {
+    } else if path_char_count < 50 {
         3.0
     } else {
         4.0
     };
 
-    // Query string length bucketing: long query strings may contain
-    // injected parameters or tracking data.
     let query_len = match path.find('?') {
-        Some(pos) => path.len() - pos,
+        Some(pos) => path.chars().count() - path[..pos].chars().count(),
         None => 0,
     };
     let query_len_bucket = if query_len == 0 {
@@ -276,9 +341,6 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
         4.0
     };
 
-    // TLD categorization: map the top-level domain to a numeric code.
-    // Popular TLDs get codes 1-16; unknown TLDs get code 0.
-    // Phishing URLs often use unusual TLDs (.xyz, .top, .tk, etc.).
     let tld = domain.split('.').next_back().unwrap_or("");
     let popular_tlds = [
         "com", "org", "net", "edu", "gov", "io", "co", "me", "uk", "us", "cn", "jp", "de", "fr",
@@ -289,8 +351,6 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
         .position(|&s| s == tld)
         .map_or(0, |i| i + 1) as f32;
 
-    // Sensitive keyword detection: phishing URLs frequently contain
-    // words related to authentication, verification, or well-known brands.
     let sensitive_words = [
         "login",
         "signin",
@@ -371,18 +431,62 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
 /// assert_eq!(clean_url("example.com"), "example.com");
 /// ```
 pub fn clean_url(url: &str) -> String {
-    let s = PROTOCOL_REGEX.replace_all(url, "");
+    let s = protocol_regex().replace(url, "");
     let s = s.to_lowercase();
-    let s = DIGIT_REGEX.replace_all(&s, "0");
+    let s = digit_regex().replace_all(&s, "0");
     s.to_string()
+}
+
+/// Reverse-map an n-gram hash bucket to the actual n-gram(s) from a URL.
+///
+/// Given a bucket index (feature index in the n-gram hash space), this
+/// function re-derives which character n-gram(s) from the URL hashed to
+/// that bucket. This is used by
+/// [`predict_url_detailed`](crate::indicators::predict_url_detailed) to
+/// translate model decision paths into human-readable risk indicators.
+///
+/// # Arguments
+///
+/// - `url`: The raw URL string (same one passed to [`extract_features`])
+/// - `bucket`: The n-gram hash bucket index to look up
+/// - `n_features`: Number of n-gram hash buckets (must match `extract_features`)
+/// - `ngram_range`: Character n-gram range `[min, max]`
+///
+/// # Returns
+///
+/// A vector of n-gram strings from the URL that hashed to the given bucket.
+/// The vector may be empty (no n-gram hit this bucket), contain one entry,
+/// or contain multiple entries (hash collisions).
+pub fn ngrams_for_bucket(
+    url: &str,
+    bucket: usize,
+    n_features: usize,
+    ngram_range: [usize; 2],
+) -> Vec<String> {
+    let cleaned = clean_url(url);
+    let chars: Vec<char> = cleaned.chars().collect();
+    let mut result = Vec::new();
+
+    for n in ngram_range[0]..=ngram_range[1] {
+        if n == 0 || n > chars.len() {
+            continue;
+        }
+        for i in 0..=(chars.len() - n) {
+            let gram: String = chars[i..i + n].iter().collect();
+            let hash = murmurhash3_x86_32(gram.as_bytes(), 0) as usize;
+            if hash % n_features == bucket {
+                result.push(gram);
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Verify URL cleaning: protocol stripping, lowercasing, and digit
-    /// normalization are applied correctly.
     #[test]
     fn test_clean_url() {
         assert_eq!(
@@ -396,24 +500,75 @@ mod tests {
         assert_eq!(clean_url("example.com"), "example.com");
     }
 
-    /// Verify that the feature vector has the correct length and contains
-    /// non-zero values (indicating n-gram hashing is working).
+    #[test]
+    fn test_murmurhash3_deterministic() {
+        let h1 = murmurhash3_x86_32(b"hello", 0);
+        let h2 = murmurhash3_x86_32(b"hello", 0);
+        assert_eq!(h1, h2, "Same input must produce same hash");
+
+        let h3 = murmurhash3_x86_32(b"world", 0);
+        assert_ne!(h1, h3, "Different inputs should produce different hashes");
+    }
+
+    #[test]
+    fn test_murmurhash3_empty() {
+        let h = murmurhash3_x86_32(b"", 0);
+        assert_eq!(h, 0, "Empty input with seed 0 should hash to 0");
+    }
+
+    #[test]
+    fn test_murmurhash3_seed_sensitivity() {
+        let h1 = murmurhash3_x86_32(b"hello", 0);
+        let h2 = murmurhash3_x86_32(b"hello", 1);
+        assert_ne!(h1, h2, "Different seeds should produce different hashes");
+    }
+
     #[test]
     fn test_extract_features_basic() {
-        let features = extract_features("example.com", 100, 19);
+        let features = extract_features("example.com", 100, 19, [2, 3]);
         assert_eq!(features.len(), 119);
         let sum: f32 = features.iter().sum();
         assert!(sum > 0.0);
     }
 
-    /// Verify that manual features are correctly extracted, including
-    /// protocol detection (HTTPS) and sensitive keyword detection ("login").
     #[test]
     fn test_extract_manual_features() {
         let features = extract_manual_features("https://example.com/login");
         assert_eq!(features.len(), 19);
-        assert_eq!(features[0], 0.0); // has_http = false
-        assert_eq!(features[1], 1.0); // has_https = true
-        assert_eq!(features[18], 1.0); // has_sensitive_word = true ("login")
+        assert_eq!(features[0], 0.0);
+        assert_eq!(features[1], 1.0);
+        assert_eq!(features[18], 1.0);
+    }
+
+    #[test]
+    fn test_ngrams_for_bucket() {
+        // "example.com" cleaned = "example.com"
+        // 2-grams: ex, xa, am, mp, pl, le, e., .c, co, om
+        // Find which bucket "lo" would NOT be in (it's not in "example.com")
+        let grams = ngrams_for_bucket("example.com", 0, 500, [2, 3]);
+        // Bucket 0 may or may not have hits, but the function should not panic
+        // and should return valid strings
+        for g in &grams {
+            assert!(!g.is_empty());
+        }
+
+        // Verify that ngrams_for_bucket returns the same n-grams that
+        // extract_features counted in that bucket
+        let features = extract_features("example.com", 500, 0, [2, 3]);
+        for (bucket, &count) in features.iter().enumerate() {
+            let ngrams = ngrams_for_bucket("example.com", bucket, 500, [2, 3]);
+            assert_eq!(
+                count as usize,
+                ngrams.len(),
+                "Bucket {} count mismatch",
+                bucket
+            );
+        }
+    }
+
+    #[test]
+    fn test_ngrams_for_bucket_empty_url() {
+        let grams = ngrams_for_bucket("", 0, 500, [2, 3]);
+        assert!(grams.is_empty(), "Empty URL should produce no n-grams");
     }
 }

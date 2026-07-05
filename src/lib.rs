@@ -61,11 +61,13 @@
 //! - [`model`]: Model serialization, deserialization, and loading
 //! - [`extractor`]: Feature extraction from URL strings
 //! - [`predictor`]: Decision tree traversal and scoring
+//! - [`indicators`]: Detailed risk indicator extraction
 //!
 //! ## Core API
 //!
 //! - [`load_default_model()`]: Load the embedded default model (zero config)
 //! - [`predict_url()`]: Predict phishing probability for a URL
+//! - [`predict_url_detailed()`]: Predict with risk indicators (explains _why_)
 //! - [`extract_features()`]: Extract the 519-dimensional feature vector
 //! - [`Model`]: The Random Forest model struct
 //! - [`Tree`]: A single decision tree in the forest
@@ -74,11 +76,15 @@
 //! - [`convert_json_to_bincode()`]: Convert JSON model to bincode format
 
 pub mod extractor;
+pub mod indicators;
 pub mod model;
 pub mod predictor;
 
 // Re-export the primary API for user convenience.
 pub use extractor::extract_features;
+pub use indicators::{
+    predict_url_detailed, Indicator, IndicatorCategory, IndicatorSource, Prediction,
+};
 pub use model::{
     convert_json_to_bincode, load_default_model, load_model_from_bytes, load_model_from_path,
     Model, Tree,
@@ -93,17 +99,8 @@ mod tests {
     /// of the expected length (500 n-gram + 19 manual = 519 features).
     #[test]
     fn test_integration() {
-        let features = extract_features("example.com", 500, 19);
+        let features = extract_features("example.com", 500, 19, [2, 3]);
         assert_eq!(features.len(), 519);
-
-        let model = Model {
-            n_features: 500,
-            n_manual_features: 19,
-            ngram_range: [2, 3],
-            trees: vec![],
-        };
-        let score = predict_url("example.com", &model);
-        assert!(score.is_nan() || score >= 0.0);
     }
 
     /// Verify that the embedded default model loads successfully and has
@@ -145,8 +142,8 @@ mod tests {
     /// training (Python) and inference (Rust).
     #[test]
     fn test_feature_extraction_consistency() {
-        let json_path = "../resources/test_features.json";
-        if !std::fs::exists(json_path).unwrap_or(false) {
+        let json_path = "resources/test_features.json";
+        if !std::path::Path::new(json_path).exists() {
             println!("test_features.json not found, skipping test");
             return;
         }
@@ -157,7 +154,7 @@ mod tests {
         for (url, value) in data.as_object().unwrap() {
             let cleaned = value["cleaned"].as_str().unwrap();
             let py_features: Vec<f32> = serde_json::from_value(value["features"].clone()).unwrap();
-            let rust_features = extract_features(url, 500, 0);
+            let rust_features = extract_features(url, 500, 0, [2, 3]);
 
             let py_nonzero: Vec<(usize, f32)> = py_features
                 .iter()

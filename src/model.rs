@@ -106,6 +106,45 @@ pub struct Model {
     pub trees: Vec<Tree>,
 }
 
+impl Model {
+    /// Extract the feature vector for a URL using this model's configuration.
+    ///
+    /// This is the recommended way to extract features, as it uses the
+    /// model's own `n_features`, `n_manual_features`, and `ngram_range`
+    /// values, eliminating the risk of parameter mismatch.
+    ///
+    /// # Arguments
+    ///
+    /// - `url`: The raw URL string to analyze
+    ///
+    /// # Returns
+    ///
+    /// A feature vector of `n_features + n_manual_features` dimensions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use phishnano::model::{Model, Tree};
+    ///
+    /// let model = Model {
+    ///     n_features: 10,
+    ///     n_manual_features: 5,
+    ///     ngram_range: [2, 3],
+    ///     trees: vec![],
+    /// };
+    /// let features = model.extract_features("https://example.com");
+    /// assert_eq!(features.len(), 15);
+    /// ```
+    pub fn extract_features(&self, url: &str) -> Vec<f32> {
+        crate::extractor::extract_features(
+            url,
+            self.n_features,
+            self.n_manual_features,
+            self.ngram_range,
+        )
+    }
+}
+
 /// Load the default embedded model (bincode format, zero configuration).
 ///
 /// This function loads the model that was compiled into the library at
@@ -174,12 +213,15 @@ pub fn load_model_from_path(path: &str) -> Result<Model, anyhow::Error> {
     load_model_from_bytes(&data)
 }
 
-/// Load a model from raw bytes, trying bincode first then JSON.
+/// Load a model from raw bytes, auto-detecting bincode or JSON format.
 ///
-/// This is the core loading function used by both [`load_default_model`]
-/// and [`load_model_from_path`]. It attempts bincode deserialization first
-/// (since it is faster and more compact), then falls back to JSON if the
-/// data does not appear to be valid bincode.
+/// Format detection is based on the first and last non-whitespace bytes:
+/// - JSON starts with `{` (0x7b) and ends with `}` (0x7d)
+/// - Bincode is any other binary format
+///
+/// This explicit detection avoids the risk of bincode silently accepting
+/// JSON or corrupted data as a garbage model (bincode has no magic number
+/// or checksum to reject invalid input).
 ///
 /// # Arguments
 ///
@@ -187,13 +229,14 @@ pub fn load_model_from_path(path: &str) -> Result<Model, anyhow::Error> {
 ///
 /// # Returns
 ///
-/// - `Ok(Model)` if either format succeeds
-/// - `Err` if both formats fail to deserialize
+/// - `Ok(Model)` if the data is valid JSON or bincode
+/// - `Err` if deserialization fails for the detected format
 ///
 /// # Errors
 ///
-/// Returns an error if the input bytes are neither valid bincode nor
-/// valid JSON for the [`Model`] struct.
+/// Returns an error if:
+/// - The data is detected as JSON but `serde_json::from_slice` fails
+/// - The data is detected as bincode but `bincode::deserialize` fails
 ///
 /// # Examples
 ///
@@ -206,11 +249,16 @@ pub fn load_model_from_path(path: &str) -> Result<Model, anyhow::Error> {
 /// assert_eq!(model.n_features, 10);
 /// ```
 pub fn load_model_from_bytes(data: &[u8]) -> Result<Model, anyhow::Error> {
-    if let Ok(model) = bincode::deserialize::<Model>(data) {
-        return Ok(model);
+    let first = data.iter().find(|&&b| !b.is_ascii_whitespace());
+    let last = data.iter().rfind(|&&b| !b.is_ascii_whitespace());
+
+    if first == Some(&b'{') && last == Some(&b'}') {
+        let model: Model = serde_json::from_slice(data)?;
+        Ok(model)
+    } else {
+        let model: Model = bincode::deserialize(data)?;
+        Ok(model)
     }
-    let model: Model = serde_json::from_slice(data)?;
-    Ok(model)
 }
 
 /// Convert a JSON model file to bincode format and write to output path.

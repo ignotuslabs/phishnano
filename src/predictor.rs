@@ -15,6 +15,13 @@
 use crate::extractor::extract_features;
 use crate::model::{Model, Tree};
 
+/// Maximum allowed tree traversal depth before bailing out.
+///
+/// This prevents infinite loops if a corrupted model file contains cyclic
+/// node references. The embedded model has a maximum depth of 7, so 1000
+/// provides ample headroom for any legitimate tree.
+const MAX_TRAVERSAL_DEPTH: usize = 1000;
+
 /// Traverse a single decision tree and return the leaf node's prediction value.
 ///
 /// The tree is represented as a flat array structure (see [`Tree`]). Starting
@@ -34,12 +41,8 @@ use crate::model::{Model, Tree};
 /// # Returns
 ///
 /// The phishing probability (0.0 to 1.0) stored at the leaf node.
-///
-/// # Panics
-///
-/// This function will panic if the tree structure is malformed (e.g.,
-/// contains cycles or invalid child indices). The training pipeline
-/// guarantees well-formed trees.
+/// Returns `0.5` (neutral) if the tree structure is malformed or exceeds
+/// [`MAX_TRAVERSAL_DEPTH`] iterations (possible cycle).
 ///
 /// # Examples
 ///
@@ -47,7 +50,6 @@ use crate::model::{Model, Tree};
 /// use phishnano::predictor::predict_tree;
 /// use phishnano::model::Tree;
 ///
-/// // A single-node tree (leaf) that always returns 0.9
 /// let tree = Tree {
 ///     left: vec![-1],
 ///     right: vec![-1],
@@ -61,20 +63,119 @@ use crate::model::{Model, Tree};
 /// ```
 pub fn predict_tree(tree: &Tree, features: &[f32]) -> f32 {
     let mut node = 0i32;
-    loop {
-        // A left child of -1 indicates a leaf node.
-        if tree.left[node as usize] == -1 {
-            return tree.value[node as usize];
+
+    for _ in 0..MAX_TRAVERSAL_DEPTH {
+        let node_idx = node as usize;
+
+        let left = match tree.left.get(node_idx) {
+            Some(&l) => l,
+            None => return 0.5,
+        };
+
+        if left == -1 {
+            return tree.value.get(node_idx).copied().unwrap_or(0.5);
         }
-        // Internal node: compare the feature value against the threshold.
-        let feature_idx = tree.feature[node as usize];
-        let threshold = tree.threshold[node as usize];
-        if features[feature_idx as usize] <= threshold {
-            node = tree.left[node as usize];
+
+        let feature_idx = tree.feature.get(node_idx).copied().unwrap_or(0);
+        let threshold = tree.threshold.get(node_idx).copied().unwrap_or(0.0);
+
+        let feature_val = features.get(feature_idx as usize).copied().unwrap_or(0.0);
+
+        let next = if feature_val <= threshold {
+            left
         } else {
-            node = tree.right[node as usize];
+            tree.right.get(node_idx).copied().unwrap_or(-1)
+        };
+
+        if next < 0 {
+            return tree.value.get(node_idx).copied().unwrap_or(0.5);
         }
+
+        node = next;
     }
+
+    0.5
+}
+
+/// A single step in a decision tree traversal path.
+///
+/// Records which feature was evaluated, the split threshold, the actual
+/// feature value for this URL, and which branch was taken.
+#[derive(Debug, Clone)]
+pub struct PathStep {
+    /// Feature index used at this split node.
+    pub feature_idx: i32,
+    /// Split threshold at this node (`feature <= threshold` → left).
+    pub threshold: f32,
+    /// Actual feature value for the URL being predicted.
+    pub feature_val: f32,
+    /// `true` if `feature_val <= threshold` (left branch), `false` for right.
+    pub went_left: bool,
+}
+
+/// Traverse a decision tree and return both the leaf prediction and the
+/// full decision path.
+///
+/// This is the path-recording variant of [`predict_tree`], used by
+/// [`predict_url_detailed`](crate::indicators::predict_url_detailed) to
+/// extract risk indicators. The traversal logic is identical to
+/// [`predict_tree`]; the only difference is that each internal node visited
+/// is recorded as a [`PathStep`].
+///
+/// # Arguments
+///
+/// - `tree`: A single decision tree from the Random Forest
+/// - `features`: The feature vector extracted from the URL
+///
+/// # Returns
+///
+/// A tuple of `(leaf_value, path)` where:
+/// - `leaf_value` is the phishing probability at the reached leaf (0.0-1.0),
+///   or 0.5 if the tree structure is malformed
+/// - `path` is a vector of [`PathStep`] records, one per internal node visited
+pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathStep>) {
+    let mut node = 0i32;
+    let mut path = Vec::new();
+
+    for _ in 0..MAX_TRAVERSAL_DEPTH {
+        let node_idx = node as usize;
+
+        let left = match tree.left.get(node_idx) {
+            Some(&l) => l,
+            None => return (0.5, path),
+        };
+
+        if left == -1 {
+            return (tree.value.get(node_idx).copied().unwrap_or(0.5), path);
+        }
+
+        let feature_idx = tree.feature.get(node_idx).copied().unwrap_or(0);
+        let threshold = tree.threshold.get(node_idx).copied().unwrap_or(0.0);
+
+        let feature_val = features.get(feature_idx as usize).copied().unwrap_or(0.0);
+
+        let went_left = feature_val <= threshold;
+        let next = if went_left {
+            left
+        } else {
+            tree.right.get(node_idx).copied().unwrap_or(-1)
+        };
+
+        path.push(PathStep {
+            feature_idx,
+            threshold,
+            feature_val,
+            went_left,
+        });
+
+        if next < 0 {
+            return (tree.value.get(node_idx).copied().unwrap_or(0.5), path);
+        }
+
+        node = next;
+    }
+
+    (0.5, path)
 }
 
 /// Predict the phishing probability of a URL using the full Random Forest model.
@@ -97,10 +198,11 @@ pub fn predict_tree(tree: &Tree, features: &[f32]) -> f32 {
 ///
 /// # Panics
 ///
-/// Panics if `model.trees` is empty, as averaging over zero trees would
-/// cause a division by zero. The embedded default model always contains
-/// 25 trees, so this panic only occurs with custom models that were
-/// incorrectly constructed.
+/// Panics if `model.trees` is empty. An empty model cannot produce a
+/// meaningful prediction, and silently returning a default value (such as
+/// 0.0 or NaN) would create a security risk where all URLs are classified
+/// as safe. The embedded default model always contains 25 trees, so this
+/// panic only occurs with custom models that were incorrectly constructed.
 ///
 /// # Examples
 ///
@@ -117,7 +219,16 @@ pub fn predict_tree(tree: &Tree, features: &[f32]) -> f32 {
 /// }
 /// ```
 pub fn predict_url(url: &str, model: &Model) -> f32 {
-    let features = extract_features(url, model.n_features, model.n_manual_features);
+    if model.trees.is_empty() {
+        panic!("predict_url: model contains no trees — cannot produce a meaningful prediction");
+    }
+
+    let features = extract_features(
+        url,
+        model.n_features,
+        model.n_manual_features,
+        model.ngram_range,
+    );
     let mut sum = 0.0;
     for tree in &model.trees {
         sum += predict_tree(tree, &features);
@@ -129,8 +240,6 @@ pub fn predict_url(url: &str, model: &Model) -> f32 {
 mod tests {
     use super::*;
 
-    /// Verify that a single-node tree (leaf only) returns its stored value
-    /// regardless of the input features.
     #[test]
     fn test_predict_tree_single_node() {
         let tree = Tree {
@@ -144,10 +253,6 @@ mod tests {
         assert_eq!(predict_tree(&tree, &features), 0.5);
     }
 
-    /// Verify that tree traversal follows the correct branch based on
-    /// the feature/threshold comparison. A feature value below the
-    /// threshold should follow the left child, and above should follow
-    /// the right child.
     #[test]
     fn test_predict_tree_with_split() {
         let tree = Tree {
@@ -157,11 +262,120 @@ mod tests {
             threshold: vec![1.0, 0.0, 0.0],
             value: vec![0.0, 0.2, 0.8],
         };
-        // Feature value 0.5 <= threshold 1.0 → go left → node 1 → leaf value 0.2
         let features_left = vec![0.5];
         assert_eq!(predict_tree(&tree, &features_left), 0.2);
-        // Feature value 1.5 > threshold 1.0 → go right → node 2 → leaf value 0.8
         let features_right = vec![1.5];
         assert_eq!(predict_tree(&tree, &features_right), 0.8);
+    }
+
+    #[test]
+    fn test_predict_tree_cycle_returns_neutral() {
+        let tree = Tree {
+            left: vec![1, 0],
+            right: vec![-1, -1],
+            feature: vec![0, 0],
+            threshold: vec![1.0, 1.0],
+            value: vec![0.0, 0.0],
+        };
+        let features = vec![0.5];
+        let score = predict_tree(&tree, &features);
+        assert_eq!(score, 0.5, "Cyclic tree should return neutral 0.5");
+    }
+
+    #[test]
+    fn test_predict_tree_out_of_bounds_returns_neutral() {
+        let tree = Tree {
+            left: vec![5],
+            right: vec![-1],
+            feature: vec![0],
+            threshold: vec![1.0],
+            value: vec![0.0],
+        };
+        let features = vec![0.5];
+        let score = predict_tree(&tree, &features);
+        assert_eq!(score, 0.5, "Out-of-bounds node should return neutral 0.5");
+    }
+
+    #[test]
+    #[should_panic(expected = "model contains no trees")]
+    fn test_predict_url_empty_trees_panics() {
+        let model = Model {
+            n_features: 10,
+            n_manual_features: 5,
+            ngram_range: [2, 3],
+            trees: vec![],
+        };
+        let _ = predict_url("http://example.com", &model);
+    }
+
+    #[test]
+    fn test_predict_tree_with_path_single_node() {
+        let tree = Tree {
+            left: vec![-1],
+            right: vec![-1],
+            feature: vec![0],
+            threshold: vec![0.0],
+            value: vec![0.5],
+        };
+        let features = vec![1.0];
+        let (score, path) = predict_tree_with_path(&tree, &features);
+        assert_eq!(score, 0.5);
+        assert!(path.is_empty(), "Single leaf node should have empty path");
+    }
+
+    #[test]
+    fn test_predict_tree_with_path_left_branch() {
+        let tree = Tree {
+            left: vec![1, -1, -1],
+            right: vec![2, -1, -1],
+            feature: vec![0, 0, 0],
+            threshold: vec![1.0, 0.0, 0.0],
+            value: vec![0.0, 0.2, 0.8],
+        };
+        let features = vec![0.5]; // 0.5 <= 1.0 → left
+        let (score, path) = predict_tree_with_path(&tree, &features);
+        assert_eq!(score, 0.2);
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].feature_idx, 0);
+        assert_eq!(path[0].feature_val, 0.5);
+        assert_eq!(path[0].threshold, 1.0);
+        assert!(path[0].went_left);
+    }
+
+    #[test]
+    fn test_predict_tree_with_path_right_branch() {
+        let tree = Tree {
+            left: vec![1, -1, -1],
+            right: vec![2, -1, -1],
+            feature: vec![0, 0, 0],
+            threshold: vec![1.0, 0.0, 0.0],
+            value: vec![0.0, 0.2, 0.8],
+        };
+        let features = vec![1.5]; // 1.5 > 1.0 → right
+        let (score, path) = predict_tree_with_path(&tree, &features);
+        assert_eq!(score, 0.8);
+        assert_eq!(path.len(), 1);
+        assert!(!path[0].went_left);
+    }
+
+    #[test]
+    fn test_predict_tree_with_path_multi_depth() {
+        // Root: feature 0 <= 0.5 → left (node 1)
+        // Node 1: feature 1 <= 0.5 → left (node 3, leaf)
+        let tree = Tree {
+            left: vec![1, 3, -1, -1],
+            right: vec![2, -1, -1, -1],
+            feature: vec![0, 1, 0, 0],
+            threshold: vec![0.5, 0.5, 0.0, 0.0],
+            value: vec![0.0, 0.0, 0.8, 0.3],
+        };
+        let features = vec![0.3, 0.4];
+        let (score, path) = predict_tree_with_path(&tree, &features);
+        assert_eq!(score, 0.3);
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].feature_idx, 0);
+        assert!(path[0].went_left);
+        assert_eq!(path[1].feature_idx, 1);
+        assert!(path[1].went_left);
     }
 }
