@@ -58,6 +58,11 @@ lazy_static! {
 ///
 /// A vector of `n_features + n_manual_features` floating-point values.
 ///
+/// # Panics
+///
+/// Panics if `n_features` is 0, as the modulo operation for hash bucket
+/// assignment would cause a division by zero.
+///
 /// # N-gram Extraction Process
 ///
 /// 1. The URL is cleaned via [`clean_url`] (strip protocol, lowercase, normalize digits)
@@ -69,6 +74,15 @@ lazy_static! {
 /// # Manual Features
 ///
 /// See [`extract_manual_features`] for the list of 19 engineered features.
+///
+/// # Examples
+///
+/// ```
+/// use phishnano::extract_features;
+///
+/// let features = extract_features("https://example.com/login", 500, 19);
+/// assert_eq!(features.len(), 519);
+/// ```
 pub fn extract_features(url: &str, n_features: usize, n_manual_features: usize) -> Vec<f32> {
     let cleaned = clean_url(url);
     let chars: Vec<char> = cleaned.chars().collect();
@@ -140,6 +154,17 @@ pub fn extract_features(url: &str, n_features: usize, n_manual_features: usize) 
 /// # Returns
 ///
 /// A vector of 19 floating-point feature values.
+///
+/// # Examples
+///
+/// ```
+/// use phishnano::extractor::extract_manual_features;
+///
+/// let features = extract_manual_features("https://example.com/login");
+/// assert_eq!(features.len(), 19);
+/// assert_eq!(features[1], 1.0);  // has_https = true
+/// assert_eq!(features[18], 1.0); // has_sensitive_word = true ("login")
+/// ```
 pub fn extract_manual_features(url: &str) -> Vec<f32> {
     let url_lower = url.to_lowercase();
 

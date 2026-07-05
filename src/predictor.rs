@@ -40,6 +40,25 @@ use crate::model::{Model, Tree};
 /// This function will panic if the tree structure is malformed (e.g.,
 /// contains cycles or invalid child indices). The training pipeline
 /// guarantees well-formed trees.
+///
+/// # Examples
+///
+/// ```
+/// use phishnano::predictor::predict_tree;
+/// use phishnano::model::Tree;
+///
+/// // A single-node tree (leaf) that always returns 0.9
+/// let tree = Tree {
+///     left: vec![-1],
+///     right: vec![-1],
+///     feature: vec![0],
+///     threshold: vec![0.5],
+///     value: vec![0.9],
+/// };
+/// let features = vec![0.3];
+/// let score = predict_tree(&tree, &features);
+/// assert_eq!(score, 0.9);
+/// ```
 pub fn predict_tree(tree: &Tree, features: &[f32]) -> f32 {
     let mut node = 0i32;
     loop {
@@ -76,7 +95,14 @@ pub fn predict_tree(tree: &Tree, features: &[f32]) -> f32 {
 /// - Scores close to 1.0 → likely a phishing URL
 /// - The default classification threshold is 0.45
 ///
-/// # Example
+/// # Panics
+///
+/// Panics if `model.trees` is empty, as averaging over zero trees would
+/// cause a division by zero. The embedded default model always contains
+/// 25 trees, so this panic only occurs with custom models that were
+/// incorrectly constructed.
+///
+/// # Examples
 ///
 /// ```no_run
 /// use phishnano::{load_default_model, predict_url};

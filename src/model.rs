@@ -40,6 +40,21 @@ const DEFAULT_MODEL_BYTES: &[u8] = include_bytes!("../resources/model_data.binco
 /// - `feature`: Feature index used for splitting at each internal node
 /// - `threshold`: Threshold value for the split (feature <= threshold → left)
 /// - `value`: Prediction value stored at leaf nodes (phishing probability)
+///
+/// # Examples
+///
+/// ```
+/// use phishnano::model::Tree;
+///
+/// let tree = Tree {
+///     left: vec![-1],
+///     right: vec![-1],
+///     feature: vec![0],
+///     threshold: vec![0.5],
+///     value: vec![0.9],
+/// };
+/// assert_eq!(tree.value[0], 0.9);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tree {
     pub left: Vec<i32>,
@@ -63,6 +78,26 @@ pub struct Tree {
 /// The feature vector has `n_features + n_manual_features` dimensions:
 /// - Indices `[0, n_features)`: Character n-gram hash counts
 /// - Indices `[n_features, n_features + n_manual_features)`: Manual features
+///
+/// # Examples
+///
+/// ```
+/// use phishnano::model::{Model, Tree};
+///
+/// let model = Model {
+///     n_features: 500,
+///     n_manual_features: 19,
+///     ngram_range: [2, 3],
+///     trees: vec![Tree {
+///         left: vec![-1],
+///         right: vec![-1],
+///         feature: vec![0],
+///         threshold: vec![0.5],
+///         value: vec![0.8],
+///     }],
+/// };
+/// assert_eq!(model.trees.len(), 1);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Model {
     pub n_features: usize,
@@ -82,7 +117,13 @@ pub struct Model {
 /// - `Ok(Model)` on successful deserialization
 /// - `Err` if the embedded model data is corrupted
 ///
-/// # Example
+/// # Errors
+///
+/// Returns an error if the embedded bincode data is corrupted or cannot
+/// be deserialized. This should never happen under normal circumstances,
+/// as the embedded model is validated at build time.
+///
+/// # Examples
 ///
 /// ```no_run
 /// use phishnano::load_default_model;
@@ -109,6 +150,23 @@ pub fn load_default_model() -> Result<Model, anyhow::Error> {
 ///
 /// - `Ok(Model)` on successful load
 /// - `Err` if the file cannot be read or deserialized
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file does not exist or cannot be read (IO error)
+/// - The file content is neither valid bincode nor valid JSON
+///   (deserialization error)
+///
+/// # Examples
+///
+/// ```no_run
+/// use phishnano::load_model_from_path;
+///
+/// // Load a bincode or JSON model from a file
+/// let model = load_model_from_path("my_model.bincode")
+///     .expect("Failed to load model");
+/// ```
 pub fn load_model_from_path(path: &str) -> Result<Model, anyhow::Error> {
     let mut file = File::open(path)?;
     let mut data = Vec::new();
@@ -131,6 +189,22 @@ pub fn load_model_from_path(path: &str) -> Result<Model, anyhow::Error> {
 ///
 /// - `Ok(Model)` if either format succeeds
 /// - `Err` if both formats fail to deserialize
+///
+/// # Errors
+///
+/// Returns an error if the input bytes are neither valid bincode nor
+/// valid JSON for the [`Model`] struct.
+///
+/// # Examples
+///
+/// ```
+/// use phishnano::load_model_from_bytes;
+///
+/// // Load a model from a JSON byte slice
+/// let json = br#"{"n_features":10,"n_manual_features":5,"ngram_range":[2,3],"trees":[]}"#;
+/// let model = load_model_from_bytes(json).expect("Failed to load");
+/// assert_eq!(model.n_features, 10);
+/// ```
 pub fn load_model_from_bytes(data: &[u8]) -> Result<Model, anyhow::Error> {
     if let Ok(model) = bincode::deserialize::<Model>(data) {
         return Ok(model);
@@ -158,6 +232,22 @@ pub fn load_model_from_bytes(data: &[u8]) -> Result<Model, anyhow::Error> {
 ///
 /// - `Ok(u64)`: Size of the bincode output in bytes
 /// - `Err` if reading JSON or writing bincode fails
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The input JSON file cannot be read or parsed
+/// - The output bincode file cannot be written
+///
+/// # Examples
+///
+/// ```no_run
+/// use phishnano::convert_json_to_bincode;
+///
+/// let size = convert_json_to_bincode("model_data.json", "model_data.bincode")
+///     .expect("Conversion failed");
+/// println!("Bincode size: {} bytes", size);
+/// ```
 pub fn convert_json_to_bincode<P: AsRef<Path>>(
     json_path: P,
     bincode_path: P,

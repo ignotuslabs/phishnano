@@ -1,8 +1,24 @@
 //! # phishnano
 //!
-//! A lightweight, embedded phishing URL detection library powered by a
+//! Lightweight offline phishing URL detection library with an embedded
 //! Random Forest model. The model is compiled into the library at build
-//! time, enabling zero-configuration usage with microsecond-level inference.
+//! time via `include_bytes!`, enabling zero-configuration, fully local
+//! inference with microsecond-level latency and no network requests.
+//!
+//! Designed for integration into password managers, browser extensions,
+//! email security gateways, and embedded systems where privacy-preserving,
+//! offline URL classification is required.
+//!
+//! ## Key Advantages
+//!
+//! - **Offline & privacy-preserving**: 100% local inference, zero network
+//!   requests, no data leaves the host
+//! - **Lightweight**: ~110 KB embedded model (bincode format)
+//! - **Low latency**: ~20 microseconds per URL on commodity hardware
+//! - **Zero configuration**: No runtime files, no API keys, no external
+//!   services
+//! - **Embedded-friendly**: Compact binary suitable for resource-constrained
+//!   environments
 //!
 //! ## Quick Start
 //!
@@ -19,19 +35,43 @@
 //! }
 //! ```
 //!
+//! ## Use Cases
+//!
+//! - **Password managers**: Warn users before autofilling credentials on
+//!   suspicious login pages
+//! - **Browser extensions**: Real-time URL classification during navigation
+//! - **Email security gateways**: Scan links in incoming messages without
+//!   forwarding URLs to cloud APIs
+//! - **Security pipelines**: Batch URL classification in SOAR / SIEM
+//!   workflows
+//! - **Embedded systems**: On-device phishing detection in network
+//!   appliances with limited connectivity
+//!
 //! ## Architecture
 //!
 //! - **Model**: Random Forest with 25 decision trees, max depth 7
 //! - **Features**: 500 character n-gram hash features + 19 manual features
-//! - **Model size**: ~100 KB (bincode format, embedded)
+//! - **Model size**: ~110 KB (bincode format, embedded)
 //! - **Inference latency**: ~20 microseconds per URL
 //! - **Privacy**: 100% local inference, no network requests
+//! - **Default threshold**: 0.45 (scores >= 0.45 are classified as phishing)
 //!
 //! ## Modules
 //!
 //! - [`model`]: Model serialization, deserialization, and loading
 //! - [`extractor`]: Feature extraction from URL strings
 //! - [`predictor`]: Decision tree traversal and scoring
+//!
+//! ## Core API
+//!
+//! - [`load_default_model()`]: Load the embedded default model (zero config)
+//! - [`predict_url()`]: Predict phishing probability for a URL
+//! - [`extract_features()`]: Extract the 519-dimensional feature vector
+//! - [`Model`]: The Random Forest model struct
+//! - [`Tree`]: A single decision tree in the forest
+//! - [`load_model_from_path()`]: Load a model from a file path
+//! - [`load_model_from_bytes()`]: Load a model from raw bytes
+//! - [`convert_json_to_bincode()`]: Convert JSON model to bincode format
 
 pub mod extractor;
 pub mod model;

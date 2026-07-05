@@ -1,14 +1,16 @@
 [package]
 name = "phishnano"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
-description = "Lightweight phishing URL detection library with embedded ML model and CLI"
-license = "MIT"
+description = "Lightweight offline phishing URL detection library with embedded Random Forest model, microsecond local inference, and zero network requests"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/ignotuslabs/phishnano"
 homepage = "https://github.com/ignotuslabs/phishnano"
-keywords = ["phishing", "security", "url", "detection", "ml"]
-categories = ["security"]
+documentation = "https://docs.rs/phishnano"
+keywords = ["phishing", "security", "url", "detection", "random-forest"]
+categories = ["security", "algorithms"]
 readme = "README.md"
+rust-version = "1.70"
 include = [
     "src/lib.rs",
     "src/extractor.rs",
@@ -19,7 +21,8 @@ include = [
     "resources/model_data.json",
     "resources/test_features.json",
     "README.md",
-    "LICENSE",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
 ]
 
 [dependencies]

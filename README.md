@@ -1,14 +1,15 @@
 # phishnano
 
-Lightweight phishing URL detection library with an embedded Random Forest model. Designed for integration into password managers, browser extensions, and security gateways where local, privacy-preserving inference is required.
+Lightweight offline phishing URL detection library with an embedded Random Forest model. Designed for integration into password managers, browser extensions, and security gateways where local, privacy-preserving inference is required.
 
 ## Features
 
-- **Embedded model**: Zero configuration, the bincode model is compiled into the library via `include_bytes!`
-- **Compact**: ~110 KB embedded model, no external files needed
-- **Fast inference**: ~20 microseconds per URL
-- **Zero network dependency**: Fully local inference, no API calls
+- **Offline & privacy-preserving**: 100% local inference, zero network requests, no data leaves the host
+- **Lightweight**: ~110 KB embedded model (bincode format), compiled into the library via `include_bytes!`
+- **Fast inference**: ~20 microseconds per URL on commodity hardware
+- **Zero configuration**: No runtime files, no API keys, no external services
 - **Cross-platform**: Windows / macOS / Linux
+- **Bundled CLI**: Binary tool included in the same crate
 
 ## Quick Start
 
@@ -35,6 +36,14 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Use Cases
+
+- **Password managers**: Warn users before autofilling credentials on suspicious login pages
+- **Browser extensions**: Real-time URL classification during navigation
+- **Email security gateways**: Scan links in incoming messages without forwarding URLs to cloud APIs
+- **Security pipelines**: Batch URL classification in SOAR / SIEM workflows
+- **Embedded systems**: On-device phishing detection in network appliances with limited connectivity
+
 ## Performance
 
 | Metric | Value |
@@ -51,9 +60,11 @@ fn main() -> anyhow::Result<()> {
 
 ## CLI Tool
 
+The CLI binary is bundled with the crate. Install it with:
+
 ```bash
-# Install
-cargo install phishnano-cli
+# Install (includes both library and CLI binary)
+cargo install phishnano
 
 # Classify a URL (uses the embedded model, no external files needed)
 phishnano-cli "http://example.com"
@@ -72,42 +83,34 @@ phishnano-cli --convert model_data.json model_data.bincode
 
 ```
 phishnano/
-|-- Cargo.toml                # Library crate + workspace root
-|-- src/                      # Library source code
-|   |-- lib.rs
+|-- Cargo.toml                # Single crate (library + CLI binary)
+|-- src/
+|   |-- lib.rs                # Library root, re-exports public API
 |   |-- model.rs              # Model struct, load_default_model(), include_bytes!
 |   |-- extractor.rs          # Feature extraction (n-gram + manual)
-|   `-- predictor.rs          # Random forest prediction
+|   |-- predictor.rs          # Random Forest prediction
+|   `-- bin/
+|       `-- phishnano-cli.rs  # CLI binary
 |-- resources/                # Model files
 |   |-- model_data.bincode    # Embedded bincode model (~110 KB)
 |   |-- model_data.json       # JSON model for debugging
 |   `-- test_features.json    # Cross-language test data
-|-- phishnano-cli/            # CLI binary crate (workspace member)
-|   |-- Cargo.toml
-|   `-- src/
-|       `-- main.rs
 |-- training/                 # Training scripts (not published to crates.io)
 |   |-- data/                 # Training datasets (gitignored)
 |   `-- scripts/              # Python training scripts
-|       |-- train.py
-|       |-- export.py
-|       |-- threshold_analysis.py
-|       |-- model_analysis.py
-|       |-- download_phreshphish.py
-|       |-- requirements.txt
-|       `-- README.md
 |-- .github/
 |   `-- workflows/
 |       |-- ci.yml            # CI: build + test + clippy + fmt
 |       `-- publish.yml       # CD: publish to crates.io on tag push
 |-- .gitignore
-|-- LICENSE
+|-- LICENSE-MIT
+|-- LICENSE-APACHE
 `-- README.md
 ```
 
 ## Training
 
-The model is pre-trained and embedded in the library. Training data and scripts are maintained in a separate repository and are not included in this crate.
+The model is pre-trained and embedded in the library. Training data and scripts are maintained in the `training/` directory (gitignored, not published to crates.io).
 
 ## Model Architecture
 
@@ -137,9 +140,18 @@ The model is trained on ~496,000 labeled URLs (after deduplication) drawn from p
 
 ## CI/CD
 
-- **CI** (`.github/workflows/ci.yml`): Builds and tests on push/PR across Ubuntu, Windows, and macOS. Runs `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo build --release --all`, and `cargo test --all`.
-- **Publish** (`.github/workflows/publish.yml`): Publishes both `phishnano` (library) and `phishnano-cli` to crates.io when a version tag (`v*`) is pushed. Requires the `CARGO_REGISTRY_TOKEN` repository secret.
+- **CI** (`.github/workflows/ci.yml`): Builds and tests on push/PR across Ubuntu, Windows, and macOS. Runs `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo build --release`, and `cargo test`.
+- **Publish** (`.github/workflows/publish.yml`): Publishes `phishnano` (library + CLI) to crates.io when a version tag (`v*`) is pushed. Requires the `CARGO_REGISTRY_TOKEN` repository secret.
+
+## API Documentation
+
+Full API documentation with examples is available at **[docs.rs/phishnano](https://docs.rs/phishnano)**.
 
 ## License
 
-MIT
+Dual-licensed under either of:
+
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT))
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.
