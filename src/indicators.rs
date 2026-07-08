@@ -194,7 +194,7 @@ pub fn predict_url_detailed(url: &str, model: &Model) -> Prediction {
         }
     }
 
-    // Priority 4: Model n-gram indicators (supplementary, less interpretable)
+    // Priority 3: Model n-gram indicators (supplementary, less interpretable)
     for (feature_idx, tree_count) in &ranked_features {
         if indicators.len() >= MAX_INDICATORS {
             break;
@@ -278,7 +278,10 @@ fn manual_feature_indicator(
         }
         19 if val >= 0.5 => Some((
             IndicatorCategory::Domain,
-            format!("Domain closely resembles a known brand (impersonation score {:.2})", val),
+            format!(
+                "Domain closely resembles a known brand (impersonation score {:.2})",
+                val
+            ),
         )),
         20 if val >= 0.7 => Some((
             IndicatorCategory::Domain,

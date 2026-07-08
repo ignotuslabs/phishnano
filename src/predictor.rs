@@ -179,6 +179,13 @@ pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathSt
     (0.0, path)
 }
 
+/// Logistic sigmoid, used to convert the LightGBM additive raw score into a
+/// calibrated phishing probability in `[0, 1]`.
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
 /// Pure forest score (no whitelist layer).
 ///
 /// This is the raw forest component used internally by the
@@ -190,13 +197,6 @@ pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathSt
 ///
 /// Panics if `model.trees` is empty, for the same safety reason as
 /// [`predict_url`].
-/// Logistic sigmoid, used to convert the LightGBM additive raw score into a
-/// calibrated phishing probability in `[0, 1]`.
-#[inline]
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
-
 pub(crate) fn predict_forest(url: &str, model: &Model) -> f32 {
     if model.trees.is_empty() {
         panic!("predict_forest: model contains no trees — cannot produce a meaningful prediction");

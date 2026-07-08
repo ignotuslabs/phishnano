@@ -65,18 +65,72 @@ pub struct Stage1Analysis {
 /// Anything NOT in this set (random strings, brand tokens, "login-secure-...")
 /// is treated as an *unusual* subdomain and deferred to the forest.
 const COMMON_SUBDOMAINS: &[&str] = &[
-    "www", "www2", "m", "mobile", "mail", "email", "webmail", "maps", "drive", "docs",
-    "documents", "accounts", "account", "api", "blog", "shop", "store", "my", "go", "app",
-    "admin", "support", "help", "news", "en", "cdn", "static", "assets", "img", "images", "image",
-    "media", "dev", "staging", "beta", "portal", "calendar", "cal", "groups", "sites", "plus",
-    "translate", "photos", "play", "music", "tv", "cloud", "one", "vpn", "learn", "login",
-    "log-in", "secure", "pay", "payment", "auth", "web", "online", "live", "home", "main", "site",
-    "us", "uk", "eu",
+    "www",
+    "www2",
+    "m",
+    "mobile",
+    "mail",
+    "email",
+    "webmail",
+    "maps",
+    "drive",
+    "docs",
+    "documents",
+    "accounts",
+    "account",
+    "api",
+    "blog",
+    "shop",
+    "store",
+    "my",
+    "go",
+    "app",
+    "admin",
+    "support",
+    "help",
+    "news",
+    "en",
+    "cdn",
+    "static",
+    "assets",
+    "img",
+    "images",
+    "image",
+    "media",
+    "dev",
+    "staging",
+    "beta",
+    "portal",
+    "calendar",
+    "cal",
+    "groups",
+    "sites",
+    "plus",
+    "translate",
+    "photos",
+    "play",
+    "music",
+    "tv",
+    "cloud",
+    "one",
+    "vpn",
+    "learn",
+    "login",
+    "log-in",
+    "secure",
+    "pay",
+    "payment",
+    "auth",
+    "web",
+    "online",
+    "live",
+    "home",
+    "main",
+    "site",
+    "us",
+    "uk",
+    "eu",
 ];
-
-fn common_subdomain_set() -> &'static [&'static str] {
-    COMMON_SUBDOMAINS
-}
 
 // ---------------------------------------------------------------------------
 // Whitelist store (zero-copy binary search over embedded bytes)
@@ -154,18 +208,25 @@ fn host_of(url: &str) -> String {
 /// e.g. host=`mail.google.com`, reg=`google.com` -> `mail`
 ///      host=`a.b.cnn.com`,     reg=`cnn.com`     -> `a.b`
 ///      host=`cnn.com`,         reg=`cnn.com`     -> ``
-fn subdomain_of(host: &str, reg: &str) -> String {
+///
+/// Borrows from `host` — zero allocations. `reg` is always a true suffix of
+/// `host` in production (it is derived from `host` by `registrable_domain`),
+/// so we strip `reg` directly and then drop the separating '.'.
+fn subdomain_of<'a>(host: &'a str, reg: &str) -> &'a str {
     if host == reg {
-        return String::new();
+        return "";
     }
-    let suffix = format!(".{}", reg);
-    if let Some(stripped) = host.strip_suffix(&suffix) {
-        return stripped.to_string();
+    if let Some(prefix) = host.strip_suffix(reg) {
+        // Common case: `<sub>.<reg>` -> drop the '.' separator.
+        if let Some(rest) = prefix.strip_suffix('.') {
+            return rest;
+        }
+        // `reg` is a suffix of `host` but not preceded by '.' (e.g.
+        // host=`login.secure-paypal.com`, reg=`paypal.com` -> `login.secure-`).
+        // Return the prefix so the caller can inspect this unusual shape.
+        return prefix;
     }
-    if let Some(stripped) = host.strip_suffix(reg) {
-        return stripped.trim_end_matches('.').to_string();
-    }
-    host.to_string()
+    host
 }
 
 // ---------------------------------------------------------------------------
@@ -197,8 +258,8 @@ fn whitelist_verdict(reg: &str, host: &str) -> (Stage1Category, f32, Option<&'st
     if is_whitelisted(reg) {
         let sub = subdomain_of(host, reg);
         let benign_sub = sub.is_empty()
-            || common_subdomain_set().contains(&sub.as_str())
-            || sub.split('.').all(|p| common_subdomain_set().contains(&p));
+            || COMMON_SUBDOMAINS.contains(&sub)
+            || sub.split('.').all(|p| COMMON_SUBDOMAINS.contains(&p));
         if benign_sub {
             return (
                 Stage1Category::Normal,

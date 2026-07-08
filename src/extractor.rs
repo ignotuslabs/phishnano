@@ -25,8 +25,8 @@
 //! implementation in `training/scripts/train.py`. Any divergence will cause
 //! the Rust inference results to differ from the Python training metrics.
 
-use percent_encoding::percent_decode_str;
 use once_cell::sync::Lazy;
+use percent_encoding::percent_decode_str;
 use regex::Regex;
 
 /// Returns a static reference to the protocol-stripping regex.
@@ -187,8 +187,7 @@ fn decode_punycode_domain(url: &str) -> String {
         .split('.')
         .map(|label| {
             if label.len() >= 4 && label.to_ascii_lowercase().starts_with("xn--") {
-                idna::punycode::decode_to_string(&label[4..])
-                    .unwrap_or_else(|| label.to_string())
+                idna::punycode::decode_to_string(&label[4..]).unwrap_or_else(|| label.to_string())
             } else {
                 label.to_string()
             }
@@ -714,7 +713,11 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
     // here so Rust stays aligned with `extract_struct_features` in
     // `training/scripts/train_lightgbm.py` for future retraining.
     feats.extend(extract_struct_features(
-        &normalized, &url_lower, url_clean_str, domain, path,
+        &normalized,
+        &url_lower,
+        url_clean_str,
+        domain,
+        path,
     ));
     feats
 }
@@ -772,8 +775,8 @@ pub fn clean_url(url: &str) -> String {
 /// Multi-part public suffixes where the registrable domain is the *third*
 /// label from the right (e.g. `example.co.uk`).
 pub(crate) const MULTI_PART_TLDS: &[&str] = &[
-    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp",
-    "co.nz", "com.br", "co.in", "com.cn", "co.kr",
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz", "com.br",
+    "co.in", "com.cn", "co.kr",
 ];
 
 /// `(brand_keyword, canonical_domain)` pairs for the most-targeted brands.
