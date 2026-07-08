@@ -29,3 +29,7 @@ Thumbs.db
 # Backup model files (kept locally, not in repo)
 resources/model_data_*.bincode
 resources/model_data_*.json
+
+# Local workspace / agent data (never commit)
+.codebuddy/
+.trae/

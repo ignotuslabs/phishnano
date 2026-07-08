@@ -19,7 +19,7 @@
 //!
 //! ## Classification Threshold
 //!
-//! The default threshold is 0.45. URLs with a score >= threshold are
+//! The default threshold is 0.20. URLs with a score >= threshold are
 //! classified as "Phishing"; otherwise "Normal". Lower the threshold
 //! for higher phishing recall (at the cost of more false positives);
 //! raise it for fewer false positives (at the cost of missing some phishing).
@@ -28,7 +28,7 @@
 //!
 //! Use `--detailed` to output risk indicators explaining why a URL was
 //! classified as phishing or normal. Indicators come from two sources:
-//! model decision tracing (which features the Random Forest used) and
+//! model decision tracing (which features the decision tree forest used) and
 //! heuristic rules (abnormal feature values).
 
 use anyhow::Context;
@@ -46,7 +46,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Arguments:");
     eprintln!("  <URL>             URL to analyze");
-    eprintln!("  --threshold <v>   Classification threshold (default: 0.45)");
+    eprintln!("  --threshold <v>   Classification threshold (default: 0.20)");
     eprintln!("  --detailed        Show risk indicators explaining the score");
     eprintln!("  --convert <json> <bin>  Convert JSON model to bincode format");
     eprintln!("  --model <path>    Load model from file instead of embedded default");
@@ -112,7 +112,7 @@ fn main() {
     let url = &args[1];
 
     // Parse optional flags: --threshold, --model, --detailed.
-    let mut threshold = 0.45;
+    let mut threshold = 0.20;
     let mut model_path: Option<String> = None;
     let mut detailed = false;
 

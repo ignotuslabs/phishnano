@@ -6,11 +6,12 @@
 //!
 //! 1. Extract features from the URL via [`extract_features`]
 //! 2. For each tree in the forest, traverse from root to leaf
-//! 3. Average all tree predictions to get the final score
+//! 3. Sum the raw leaf values and apply `sigmoid(init_score + Σ raw_leaf)`
+//!    to get the calibrated probability (LightGBM additive semantics)
 //!
 //! A score of 0.0 indicates "definitely normal", 1.0 indicates
 //! "definitely phishing". The classification threshold is typically
-//! set at 0.45, meaning scores >= 0.45 are classified as phishing.
+//! set at 0.20, meaning scores >= 0.20 are classified as phishing.
 
 use crate::extractor::extract_features;
 use crate::model::{Model, Tree};
@@ -41,8 +42,8 @@ const MAX_TRAVERSAL_DEPTH: usize = 1000;
 /// # Returns
 ///
 /// The phishing probability (0.0 to 1.0) stored at the leaf node.
-/// Returns `0.5` (neutral) if the tree structure is malformed or exceeds
-/// [`MAX_TRAVERSAL_DEPTH`] iterations (possible cycle).
+/// Returns `0.0` (neutral additive contribution) if the tree structure is
+/// malformed or exceeds [`MAX_TRAVERSAL_DEPTH`] iterations (possible cycle).
 ///
 /// # Examples
 ///
@@ -69,7 +70,7 @@ pub fn predict_tree(tree: &Tree, features: &[f32]) -> f32 {
 
         let left = match tree.left.get(node_idx) {
             Some(&l) => l,
-            None => return 0.5,
+            None => return 0.0,
         };
 
         if left == -1 {
@@ -88,13 +89,13 @@ pub fn predict_tree(tree: &Tree, features: &[f32]) -> f32 {
         };
 
         if next < 0 {
-            return tree.value.get(node_idx).copied().unwrap_or(0.5);
+            return tree.value.get(node_idx).copied().unwrap_or(0.0);
         }
 
         node = next;
     }
 
-    0.5
+    0.0
 }
 
 /// A single step in a decision tree traversal path.
@@ -131,7 +132,7 @@ pub struct PathStep {
 ///
 /// A tuple of `(leaf_value, path)` where:
 /// - `leaf_value` is the phishing probability at the reached leaf (0.0-1.0),
-///   or 0.5 if the tree structure is malformed
+///   or 0.0 if the tree structure is malformed
 /// - `path` is a vector of [`PathStep`] records, one per internal node visited
 pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathStep>) {
     let mut node = 0i32;
@@ -142,7 +143,7 @@ pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathSt
 
         let left = match tree.left.get(node_idx) {
             Some(&l) => l,
-            None => return (0.5, path),
+            None => return (0.0, path),
         };
 
         if left == -1 {
@@ -169,20 +170,62 @@ pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathSt
         });
 
         if next < 0 {
-            return (tree.value.get(node_idx).copied().unwrap_or(0.5), path);
+            return (tree.value.get(node_idx).copied().unwrap_or(0.0), path);
         }
 
         node = next;
     }
 
-    (0.5, path)
+    (0.0, path)
 }
 
-/// Predict the phishing probability of a URL using the full Random Forest model.
+/// Pure Random-Forest score (Stage 2 only, no Stage-1 rule layer).
 ///
-/// This is the main entry point for phishing detection. It extracts features
-/// from the URL, runs them through every tree in the forest, and returns the
-/// average prediction (phishing probability).
+/// This is the raw forest component used internally by the two-stage
+/// [`crate::scoring::score_url`] scorer. Most callers should use
+/// [`predict_url`], which applies the full two-stage pipeline
+/// (deterministic whitelist / brand / high-risk-TLD layer + forest refinement).
+///
+/// # Panics
+///
+/// Panics if `model.trees` is empty, for the same safety reason as
+/// [`predict_url`].
+/// Logistic sigmoid, used to convert the LightGBM additive raw score into a
+/// calibrated phishing probability in `[0, 1]`.
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+pub(crate) fn predict_forest(url: &str, model: &Model) -> f32 {
+    if model.trees.is_empty() {
+        panic!("predict_forest: model contains no trees — cannot produce a meaningful prediction");
+    }
+
+    let features = extract_features(
+        url,
+        model.n_features,
+        model.n_manual_features,
+        model.ngram_range,
+    );
+    // LightGBM is additive: each tree contributes a *raw* logit, and the final
+    // probability is `sigmoid(init_score + Σ raw_leaf)`. The legacy sklearn
+    // RandomForest export averaged leaf probabilities instead; the production
+    // model is LightGBM, so we always apply the sigmoid here. `init_score`
+    // defaults to 0.0 for any export that omitted it.
+    let mut raw = 0.0f32;
+    for tree in &model.trees {
+        raw += predict_tree(tree, &features);
+    }
+    sigmoid(model.init_score + raw)
+}
+
+/// Predict the phishing probability of a URL using the full two-stage pipeline.
+///
+/// This is the main entry point for phishing detection. It applies the
+/// deterministic **Stage-1** rule layer (whitelist fix / brand-impersonation
+/// / high-risk TLD) and refines with the embedded **decision tree forest** (Stage 2).
+/// See [`crate::scoring`] for the architecture and rationale.
 ///
 /// # Arguments
 ///
@@ -194,14 +237,14 @@ pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathSt
 /// A floating-point score between 0.0 and 1.0:
 /// - Scores close to 0.0 → likely a legitimate URL
 /// - Scores close to 1.0 → likely a phishing URL
-/// - The default classification threshold is 0.45
+/// - The default classification threshold is 0.20
 ///
 /// # Panics
 ///
 /// Panics if `model.trees` is empty. An empty model cannot produce a
 /// meaningful prediction, and silently returning a default value (such as
 /// 0.0 or NaN) would create a security risk where all URLs are classified
-/// as safe. The embedded default model always contains 25 trees, so this
+/// as safe. The embedded default model always contains 100 trees, so this
 /// panic only occurs with custom models that were incorrectly constructed.
 ///
 /// # Examples
@@ -212,28 +255,14 @@ pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathSt
 /// let model = load_default_model().unwrap();
 /// let score = predict_url("http://suspicious-site.com/login", &model);
 ///
-/// if score >= 0.45 {
+/// if score >= 0.20 {
 ///     println!("WARNING: Potential phishing site (score={:.4})", score);
 /// } else {
 ///     println!("URL appears safe (score={:.4})", score);
 /// }
 /// ```
 pub fn predict_url(url: &str, model: &Model) -> f32 {
-    if model.trees.is_empty() {
-        panic!("predict_url: model contains no trees — cannot produce a meaningful prediction");
-    }
-
-    let features = extract_features(
-        url,
-        model.n_features,
-        model.n_manual_features,
-        model.ngram_range,
-    );
-    let mut sum = 0.0;
-    for tree in &model.trees {
-        sum += predict_tree(tree, &features);
-    }
-    sum / model.trees.len() as f32
+    crate::scoring::score_url(url, model)
 }
 
 #[cfg(test)]
@@ -279,7 +308,7 @@ mod tests {
         };
         let features = vec![0.5];
         let score = predict_tree(&tree, &features);
-        assert_eq!(score, 0.5, "Cyclic tree should return neutral 0.5");
+        assert_eq!(score, 0.0, "Cyclic tree should return neutral 0.0");
     }
 
     #[test]
@@ -293,7 +322,7 @@ mod tests {
         };
         let features = vec![0.5];
         let score = predict_tree(&tree, &features);
-        assert_eq!(score, 0.5, "Out-of-bounds node should return neutral 0.5");
+        assert_eq!(score, 0.0, "Out-of-bounds node should return neutral 0.0");
     }
 
     #[test]
@@ -303,6 +332,7 @@ mod tests {
             n_features: 10,
             n_manual_features: 5,
             ngram_range: [2, 3],
+            init_score: 0.0,
             trees: vec![],
         };
         let _ = predict_url("http://example.com", &model);

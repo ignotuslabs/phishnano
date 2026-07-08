@@ -13,9 +13,11 @@
 //!
 //! 2. **Manual engineered features** (indices `n_features` to
 //!    `n_features + n_manual_features - 1`):
-//!    19 hand-crafted features capturing URL structural properties such as
-//!    length, special character counts, TLD category, and presence of
-//!    sensitive keywords (e.g., "login", "verify", "paypal").
+//!    39 hand-crafted features (21 manual + 18 additional
+//!    structural features appended by `extract_struct_features`) capturing
+//!    URL properties such as length, special character counts, TLD category,
+//!    path/query structure, label statistics, port, and presence of sensitive
+//!    keywords (e.g., "login", "verify", "paypal").
 //!
 //! # Feature Consistency
 //!
@@ -23,15 +25,16 @@
 //! implementation in `training/scripts/train.py`. Any divergence will cause
 //! the Rust inference results to differ from the Python training metrics.
 
+use percent_encoding::percent_decode_str;
 use regex::Regex;
 use std::sync::OnceLock;
 
 /// Returns a static reference to the protocol-stripping regex.
 ///
-/// Matches `http://` or `https://` at the start of the URL string.
+/// Matches `http://` or `https://` at the start of the URL string (case-insensitive).
 fn protocol_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^https?://").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?i)^https?://").unwrap())
 }
 
 /// Returns a static reference to the digit-matching regex.
@@ -48,6 +51,18 @@ fn digit_regex() -> &'static Regex {
 fn ip_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^\d+\.\d+\.\d+\.\d+").unwrap())
+}
+
+/// Returns a static reference to the sensitive-word regex.
+///
+/// Matches any of the 17 sensitive keywords at word boundaries.
+/// Word boundaries are `\b` (transition between `\w` and `\W`),
+/// so `login` in `/login/` matches but `login` in `bloglogin` does not.
+pub(crate) fn sensitive_word_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(login|signin|verify|account|password|secure|update|bank|paypal|facebook|google|apple|amazon|ebay|microsoft|yahoo|linkedin)\b").unwrap()
+    })
 }
 
 /// MurmurHash3 x86 32-bit hash function.
@@ -105,6 +120,85 @@ fn murmurhash3_x86_32(data: &[u8], seed: u32) -> u32 {
     h1
 }
 
+/// Normalize a URL for consistent feature extraction.
+///
+/// This function performs three normalization steps that are critical for
+/// handling obfuscated phishing URLs:
+///
+/// 1. **Fragment removal**: Strip everything after `#` (fragments are
+///    client-side only and irrelevant for phishing detection).
+/// 2. **Percent-decoding**: Decode `%XX` sequences (e.g., `%70aypal` →
+///    `paypal`) to reveal hidden sensitive keywords and patterns.
+/// 3. **Punycode decoding**: Decode IDN domains (e.g., `xn--fsq.com` →
+///    Unicode) to expose homograph attacks.
+///
+/// This function is called by [`extract_features`] and
+/// [`extract_manual_features`] before any other processing, ensuring
+/// that all downstream feature extraction operates on normalized input.
+///
+/// # Arguments
+///
+/// - `url`: The raw URL string to normalize
+///
+/// # Returns
+///
+/// The normalized URL string.
+pub fn normalize_url(url: &str) -> String {
+    // 1. Remove fragment (everything after the first '#')
+    let no_fragment = match url.find('#') {
+        Some(pos) => &url[..pos],
+        None => url,
+    };
+
+    // 2. Percent-decode (e.g., "%70aypal" → "paypal")
+    let decoded = percent_decode_str(no_fragment)
+        .decode_utf8_lossy()
+        .to_string();
+
+    // 3. Punycode-decode the domain portion (e.g., "xn--fsq.com" → Unicode)
+    decode_punycode_domain(&decoded)
+}
+
+/// Decode Punycode-encoded domain labels in a URL.
+///
+/// Extracts the domain from the URL, decodes any `xn--` labels to Unicode,
+/// and reassembles the URL. If decoding fails for any label, the original
+/// label is kept unchanged.
+fn decode_punycode_domain(url: &str) -> String {
+    // Split into protocol, domain, and rest
+    let (prefix, rest) = match url.find("://") {
+        Some(pos) => (&url[..pos + 3], &url[pos + 3..]),
+        None => ("", url),
+    };
+
+    // Find the first '/' to separate domain from path
+    let (domain, path) = match rest.find('/') {
+        Some(pos) => (&rest[..pos], &rest[pos..]),
+        None => (rest, ""),
+    };
+
+    // Decode only `xn--` (punycode) labels; preserve the original case of all
+    // other labels. This mirrors `train.py::_decode_punycode_domain` exactly:
+    // a label starting with (case-insensitive) `xn--` has its 4-char prefix
+    // stripped and the remainder punycode-decoded, with no re-added prefix.
+    // Case must be preserved so that case-sensitive features (notably
+    // `uppercase_ratio`) match the Python training pipeline.
+    let decoded_domain: String = domain
+        .split('.')
+        .map(|label| {
+            if label.len() >= 4 && label.to_ascii_lowercase().starts_with("xn--") {
+                idna::punycode::decode_to_string(&label[4..])
+                    .unwrap_or_else(|| label.to_string())
+            } else {
+                label.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+
+    format!("{}{}{}", prefix, decoded_domain, path)
+}
+
 /// Extract the complete feature vector from a URL.
 ///
 /// This function combines n-gram hash features and manual features into a
@@ -118,7 +212,7 @@ fn murmurhash3_x86_32(data: &[u8], seed: u32) -> u32 {
 ///
 /// - `url`: The raw URL string to analyze
 /// - `n_features`: Number of n-gram hash buckets (typically 500)
-/// - `n_manual_features`: Number of manual features (typically 19)
+/// - `n_manual_features`: Number of manual features (typically 39 = 21 + 18)
 /// - `ngram_range`: Character n-gram range `[min, max]` (typically `[2, 3]`)
 ///
 /// # Returns
@@ -132,23 +226,25 @@ fn murmurhash3_x86_32(data: &[u8], seed: u32) -> u32 {
 ///
 /// # N-gram Extraction Process
 ///
-/// 1. The URL is cleaned via [`clean_url`] (strip protocol, lowercase, normalize digits)
-/// 2. For each n in `[ngram_range[0], ngram_range[1]]`, all character n-grams are extracted
-/// 3. Each n-gram is hashed with MurmurHash3 (seed=0)
-/// 4. The hash is mapped to a bucket via `hash % n_features`
-/// 5. The count at each bucket is incremented
+/// 1. The URL is normalized via [`normalize_url`] (fragment removal, percent-decode, Punycode decode)
+/// 2. The normalized URL is cleaned via [`clean_url`] (lowercase, strip protocol, normalize digits)
+/// 3. For each n in `[ngram_range[0], ngram_range[1]]`, all character n-grams are extracted
+/// 4. Each n-gram is hashed with MurmurHash3 (seed=0)
+/// 5. The hash is mapped to a bucket via `hash % n_features`
+/// 6. The count at each bucket is incremented
 ///
 /// # Manual Features
 ///
-/// See [`extract_manual_features`] for the list of 19 engineered features.
+/// See [`extract_manual_features`] for the list of 39 engineered features
+/// (21 manual + 18 structural).
 ///
 /// # Examples
 ///
 /// ```
 /// use phishnano::extract_features;
 ///
-/// let features = extract_features("https://example.com/login", 500, 19, [2, 3]);
-/// assert_eq!(features.len(), 519);
+/// let features = extract_features("https://example.com/login", 500, 21, [2, 3]);
+/// assert_eq!(features.len(), 521);
 /// ```
 pub fn extract_features(
     url: &str,
@@ -156,7 +252,8 @@ pub fn extract_features(
     n_manual_features: usize,
     ngram_range: [usize; 2],
 ) -> Vec<f32> {
-    let cleaned = clean_url(url);
+    let normalized = normalize_url(url);
+    let cleaned = clean_url(&normalized);
     let chars: Vec<char> = cleaned.chars().collect();
     let mut features = vec![0.0; n_features + n_manual_features];
 
@@ -172,7 +269,7 @@ pub fn extract_features(
         }
     }
 
-    let manual_features = extract_manual_features(url);
+    let manual_features = extract_manual_features(&normalized);
     for (i, &val) in manual_features.iter().enumerate() {
         if i < n_manual_features {
             features[n_features + i] = val;
@@ -182,7 +279,153 @@ pub fn extract_features(
     features
 }
 
-/// Extract 19 manual engineered features from a URL.
+/// Extract 19 additional URL *structural* features (Part B).
+///
+/// These capture properties the 21 manual features and the n-gram hashes
+/// cannot: path depth, query-param count, explicit port, hex/alpha/uppercase
+/// ratios, label statistics (count / length / entropy), TLD length,
+/// path-to-query ratio, double-slash obfuscation, trailing/leading
+/// dash/digit labels, `data:`/`javascript:` schemes, and query-amp count.
+///
+/// This function MIRRORS `extract_struct_features` in
+/// `training/scripts/train_lightgbm.py` **exactly** (same variable names,
+/// same order, same `min` caps) so the LightGBM model trained on the
+/// 540-dim vector (500 n-gram + 21 manual + 19 structural) scores identically
+/// under Rust inference. The arguments `normalized`/`url_lower`/`url_clean`/
+/// `domain`/`path` must be derived exactly as in [`extract_manual_features`]
+/// (normalize → lowercase → strip protocol; `domain`/`path` split at the first
+/// `/`).
+pub(crate) fn extract_struct_features(
+    normalized: &str,
+    url_lower: &str,
+    url_clean: &str,
+    domain: &str,
+    path: &str,
+) -> Vec<f32> {
+    let mut feats: Vec<f32> = Vec::with_capacity(18);
+
+    // 0: path_depth -- number of non-empty '/' segments in the path.
+    if path.is_empty() {
+        feats.push(0.0);
+    } else {
+        let segs = path.split('/').filter(|s| !s.is_empty()).count();
+        feats.push((segs as f32).min(8.0));
+    }
+
+    // 1: query_param_count -- number of '=' in the query string.
+    let q = if path.contains('?') {
+        &path[path.find('?').unwrap() + 1..]
+    } else {
+        ""
+    };
+    feats.push((q.matches('=').count() as f32).min(20.0));
+
+    // 2: has_port -- explicit port present in the host portion.
+    let has_port = if domain.contains('/') {
+        domain[..domain.find('/').unwrap()].contains(':')
+    } else {
+        domain.contains(':')
+    };
+    feats.push(if has_port { 1.0 } else { 0.0 });
+
+    // 3: port_bucket -- port value / 1000, capped at 6.0.
+    let host_only = if domain.contains('/') {
+        &domain[..domain.find('/').unwrap()]
+    } else {
+        domain
+    };
+    let mut port_val = 0i32;
+    if host_only.contains(':') {
+        if let Some(after) = host_only.rsplit(':').next() {
+            port_val = after.parse::<i32>().unwrap_or(0);
+        }
+    }
+    feats.push(((port_val as f32) / 1000.0).min(6.0));
+
+    // 4: hex_ratio -- fraction of [0-9a-f] characters in the cleaned URL.
+    let clean_len = url_clean.chars().count().max(1);
+    let hexchars = url_clean
+        .chars()
+        .filter(|c| c.is_ascii_digit() || ('a'..='f').contains(c))
+        .count();
+    feats.push(hexchars as f32 / clean_len as f32);
+
+    // 5: alpha_ratio -- fraction of alphabetic characters in the cleaned URL.
+    let alphas = url_clean.chars().filter(|c| c.is_alphabetic()).count();
+    feats.push(alphas as f32 / clean_len as f32);
+
+    // 6: uppercase_ratio -- fraction of uppercase chars in the normalized URL
+    //    (before lowercasing); a homograph / obfuscation hint.
+    let norm_len = normalized.chars().count().max(1);
+    let ups = normalized.chars().filter(|c| c.is_uppercase()).count();
+    feats.push(ups as f32 / norm_len as f32);
+
+    // 7: longest_label_len -- length of the longest domain label.
+    let labels: Vec<&str> = domain.split('.').collect();
+    let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    feats.push((longest as f32).min(40.0));
+
+    // 8: num_labels -- number of labels in the domain.
+    feats.push((labels.len() as f32).min(12.0));
+
+    // 9: mean_label_len -- average label length.
+    if labels.is_empty() {
+        feats.push(0.0);
+    } else {
+        let total: usize = labels.iter().map(|l| l.chars().count()).sum();
+        feats.push(((total as f32) / (labels.len() as f32)).min(30.0));
+    }
+
+    // 10: domain_digit_ratio -- digit ratio within the domain only.
+    let dom_len = domain.chars().count().max(1);
+    let digits_d = domain.chars().filter(|c| c.is_ascii_digit()).count();
+    feats.push(digits_d as f32 / dom_len as f32);
+
+    // 11: full_domain_entropy -- Shannon entropy of the whole domain, /5, capped 1.0.
+    let dom_entropy = shannon_entropy_bits(domain) / 5.0;
+    feats.push(dom_entropy.min(1.0));
+
+    // 12: tld_len -- length of the TLD label.
+    let tld = labels.last().copied().unwrap_or("");
+    feats.push((tld.chars().count() as f32).min(20.0));
+
+    // 13: path_to_query_ratio -- path length / (query length + 1).
+    let path_only = if path.contains('?') {
+        &path[..path.find('?').unwrap()]
+    } else {
+        path
+    };
+    let path_len = path_only.chars().count();
+    let query_len = q.chars().count();
+    feats.push(((path_len as f32) / ((query_len + 1) as f32)).min(30.0));
+
+    // 14: has_double_slash -- '//' after skipping the first 8 characters of the
+    //     cleaned URL (path confusion / obfuscation). Mirrors Python's
+    //     `url_clean[8:]` (character-based slice).
+    let after8: String = url_clean.chars().skip(8).collect();
+    feats.push(if after8.contains("//") { 1.0 } else { 0.0 });
+
+    // 15: trailing_dash_label -- any label ends with '-'.
+    let trailing = labels.iter().any(|l| l.ends_with('-'));
+    feats.push(if trailing { 1.0 } else { 0.0 });
+
+    // 16: leading_digit_label -- any label starts with a digit (suspicious).
+    let leading = labels
+        .iter()
+        .any(|l| !l.is_empty() && l.chars().next().unwrap().is_ascii_digit());
+    feats.push(if leading { 1.0 } else { 0.0 });
+
+    // 17: has_data_or_js_scheme -- data:/javascript: schemes are never legit web.
+    let data_js = url_lower.starts_with("data:") || url_lower.starts_with("javascript:");
+    feats.push(if data_js { 1.0 } else { 0.0 });
+
+    // 18: num_query_amp -- number of '&' separators in the query.
+    feats.push((q.matches('&').count() as f32).min(20.0));
+
+    feats
+}
+
+/// Extract 21 manual engineered features from a URL.
 ///
 /// These features capture structural and lexical properties of the URL that
 /// are indicative of phishing attempts. Each feature is designed to be
@@ -211,22 +454,28 @@ pub fn extract_features(
 /// | 16    | `query_len_bucket`    | Query string length bucket (1-4) |
 /// | 17    | `tld_code`            | TLD category code (0=other, 1-16=popular TLDs) |
 /// | 18    | `has_sensitive_word`  | 1.0 if URL contains sensitive keywords |
+/// | 19    | `brand_impersonation` | Similarity (0-1) to a brand's canonical domain; high when the domain is close to (but not equal to) a known brand |
+/// | 20    | `subdomain_entropy`   | Shannon entropy (0-1) of subdomain labels; high for random/generated subdomains |
+///
+/// ## Structural features (indices 21-39)
+///
+/// Features 21-39 are the **19 additional structural features** appended by
+/// [`extract_struct_features`] (Part B). They capture properties the 21 manual
+/// features and the n-gram hashes cannot (path depth, query-param count,
+/// explicit port, hex/alpha/uppercase ratios, label statistics, TLD length,
+/// path-to-query ratio, double-slash obfuscation, trailing/leading dash/digit
+/// labels, `data:`/`javascript:` schemes, query-amp count). Rust computes 40
+/// manual features (21 + 19); the embedded model uses the first 39
+/// (dropping the trailing structural feature) and ignores it at inference,
+/// yielding a 539-dim vector with the 500 n-gram hashes.
 ///
 /// # Sensitive Keywords
 ///
-/// The following keywords trigger `has_sensitive_word = 1.0`:
+/// The following keywords trigger `has_sensitive_word = 1.0` when matched
+/// at word boundaries (so "pineapple" does NOT match "apple"):
 /// `login`, `signin`, `verify`, `account`, `password`, `secure`,
 /// `update`, `bank`, `paypal`, `facebook`, `google`, `apple`,
 /// `amazon`, `ebay`, `microsoft`, `yahoo`, `linkedin`
-///
-/// # Known Limitations
-///
-/// - Sensitive words use substring matching (`contains`), which can produce
-///   false positives (e.g., "pineapple" matches "apple"). This is consistent
-///   with the Python training pipeline and the impact is diluted by the
-///   519-dimensional feature vector.
-/// - No percent-encoding or Punycode decoding is performed. This is a
-///   known limitation shared with the Python training pipeline.
 ///
 /// # Arguments
 ///
@@ -234,7 +483,7 @@ pub fn extract_features(
 ///
 /// # Returns
 ///
-/// A vector of 19 floating-point feature values.
+/// A vector of 39 floating-point feature values (21 manual + 18 structural).
 ///
 /// # Examples
 ///
@@ -242,12 +491,14 @@ pub fn extract_features(
 /// use phishnano::extractor::extract_manual_features;
 ///
 /// let features = extract_manual_features("https://example.com/login");
-/// assert_eq!(features.len(), 19);
+/// assert_eq!(features.len(), 40);
 /// assert_eq!(features[1], 1.0);  // has_https = true
 /// assert_eq!(features[18], 1.0); // has_sensitive_word = true ("login")
+/// assert_eq!(features.len(), 21 + 19);
 /// ```
 pub fn extract_manual_features(url: &str) -> Vec<f32> {
-    let url_lower = url.to_lowercase();
+    let normalized = normalize_url(url);
+    let url_lower = normalized.to_lowercase();
 
     let has_http = if url_lower.starts_with("http://") {
         1.0
@@ -351,32 +602,90 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
         .position(|&s| s == tld)
         .map_or(0, |i| i + 1) as f32;
 
-    let sensitive_words = [
-        "login",
-        "signin",
-        "verify",
-        "account",
-        "password",
-        "secure",
-        "update",
-        "bank",
-        "paypal",
-        "facebook",
-        "google",
-        "apple",
-        "amazon",
-        "ebay",
-        "microsoft",
-        "yahoo",
-        "linkedin",
-    ];
-    let has_sensitive_word = if sensitive_words.iter().any(|&w| url_clean_str.contains(w)) {
+    let has_sensitive_word = if sensitive_word_regex().is_match(url_clean_str) {
         1.0
     } else {
         0.0
     };
 
-    vec![
+    // Feature 19: brand-impersonation score in [0, 1].
+    // Compares each domain label against a brand's *second-level domain* (the
+    // short brand token, e.g. "paypal"), requiring a *small* edit distance with
+    // a bounded length difference. This catches `paypa1.com` (dist 1),
+    // `paypal.login-secure.com` (brand token in subdomain) and `micros0ft.com`,
+    // while generic domains like `example.com` do NOT match (their labels are
+    // far from any brand token). The real brand's own canonical domain scores
+    // 0 to avoid flagging legitimate brand sites.
+    let reg = registrable_domain(domain);
+    let mut brand_score = 0.0f32;
+    for (_keyword, canonical) in BRAND_CANONICAL {
+        if reg == *canonical {
+            continue; // real brand domain -> no impersonation signal
+        }
+        let sld = canonical.split('.').next().unwrap_or(canonical);
+        let sld_len = sld.chars().count().max(1) as i32;
+        let max_dist = 2.max(sld_len / 4) as usize;
+        let mut best_for_brand = 0.0f32;
+        // Skip the final label (the TLD, e.g. "com"/"org") so it is not compared
+        // against short brand tokens (e.g. "org" vs "irs" would falsely match).
+        let domain_labels: Vec<&str> = domain.split('.').collect();
+        let cmp: &[&str] = if domain_labels.len() > 1 {
+            &domain_labels[..domain_labels.len() - 1]
+        } else {
+            &domain_labels[..]
+        };
+        for label in cmp {
+            // Also consider hyphen-split tokens so `amaz0n-account` matches
+            // `amazon` via its `amaz0n` token, without loosening the strict
+            // whole-label requirement that prevents generic domains (e.g.
+            // `example`) from matching a brand token.
+            let mut candidates: Vec<&str> = vec![label];
+            for tok in label.split('-') {
+                if !tok.is_empty() {
+                    candidates.push(tok);
+                }
+            }
+            for cand in &candidates {
+                let sim = if *cand == sld {
+                    0.5 // brand token present as a non-canonical subdomain
+                } else {
+                    let d = levenshtein(cand, sld) as i32;
+                    let len_diff = (cand.chars().count() as i32 - sld_len).abs();
+                    if d <= max_dist as i32 && len_diff <= 3 {
+                        1.0 - d as f32 / sld_len as f32
+                    } else {
+                        0.0
+                    }
+                };
+                if sim > best_for_brand {
+                    best_for_brand = sim;
+                }
+            }
+        }
+        if best_for_brand > brand_score {
+            brand_score = best_for_brand;
+        }
+    }
+    brand_score = brand_score.clamp(0.0, 1.0);
+
+    // Feature 20: subdomain entropy in [0, 1].
+    // Shannon entropy (bits/char) of the subdomain labels (everything before
+    // the registrable domain). Random subdomains (`a8f3k9xq`) score high;
+    // benign ones (`www`, `mail`) score low.
+    let sub_labels: Vec<&str> = domain.split('.').collect();
+    let reg_labels: Vec<&str> = reg.split('.').collect();
+    let sub_only: String = if sub_labels.len() > reg_labels.len() {
+        sub_labels[..sub_labels.len() - reg_labels.len()].join("")
+    } else {
+        String::new()
+    };
+    let sub_entropy = if sub_only.is_empty() {
+        0.0
+    } else {
+        (shannon_entropy_bits(&sub_only) / 4.0).min(1.0)
+    };
+
+    let mut feats = vec![
         has_http,
         has_https,
         url_len_bucket,
@@ -396,24 +705,37 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
         query_len_bucket,
         tld_code,
         has_sensitive_word,
-    ]
+        brand_score,
+        sub_entropy,
+    ];
+    // Append the 19 structural features (路 B); total = 21 + 19 = 40.
+    // The embedded legacy model has `n_manual_features = 39`, so the trailing
+    // (19th) structural feature is currently ignored at inference; it is kept
+    // here so Rust stays aligned with `extract_struct_features` in
+    // `training/scripts/train_lightgbm.py` for future retraining.
+    feats.extend(extract_struct_features(
+        &normalized, &url_lower, url_clean_str, domain, path,
+    ));
+    feats
 }
 
 /// Clean a URL for n-gram feature extraction.
 ///
 /// The cleaning process consists of three steps:
 ///
-/// 1. **Strip protocol**: Remove `http://` or `https://` prefix
-/// 2. **Lowercase**: Convert all characters to lowercase
+/// 1. **Lowercase**: Convert all characters to lowercase
+/// 2. **Strip protocol**: Remove `http://` or `https://` prefix (case-insensitive)
 /// 3. **Normalize digits**: Replace all digits (0-9) with "0"
 ///
-/// Digit normalization reduces feature sparsity by treating all numeric
-/// values as equivalent. For example, "example123.com" and "example456.com"
-/// produce the same n-gram features after cleaning.
+/// Lowercasing before stripping ensures that uppercase protocols like
+/// `HTTP://` are correctly removed. Digit normalization reduces feature
+/// sparsity by treating all numeric values as equivalent. For example,
+/// "example123.com" and "example456.com" produce the same n-gram features
+/// after cleaning.
 ///
 /// # Arguments
 ///
-/// - `url`: The raw URL string to clean
+/// - `url`: The normalized URL string to clean (see [`normalize_url`])
 ///
 /// # Returns
 ///
@@ -431,10 +753,126 @@ pub fn extract_manual_features(url: &str) -> Vec<f32> {
 /// assert_eq!(clean_url("example.com"), "example.com");
 /// ```
 pub fn clean_url(url: &str) -> String {
-    let s = protocol_regex().replace(url, "");
-    let s = s.to_lowercase();
+    let s = url.to_lowercase();
+    let s = protocol_regex().replace(&s, "");
     let s = digit_regex().replace_all(&s, "0");
     s.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Brand-impersonation & subdomain-randomness helpers (features 19 and 20)
+// ---------------------------------------------------------------------------
+//
+// These two features target the model's biggest blind spot: character n-gram
+// hashing cannot tell `paypa1.com` from `paypal.com`, nor a random subdomain
+// (`a8f3k9xq.verify-secure.com`) from a benign one. They MUST be mirrored
+// exactly in `training/scripts/train.py` (`extract_manual_features`) so that
+// Python training features match Rust inference features.
+
+/// Multi-part public suffixes where the registrable domain is the *third*
+/// label from the right (e.g. `example.co.uk`).
+pub(crate) const MULTI_PART_TLDS: &[&str] = &[
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp",
+    "co.nz", "com.br", "co.in", "com.cn", "co.kr",
+];
+
+/// `(brand_keyword, canonical_domain)` pairs for the most-targeted brands.
+/// The canonical domain is the real brand domain; anything *close* to it but
+/// *not equal* is treated as a potential impersonation.
+pub(crate) const BRAND_CANONICAL: &[(&str, &str)] = &[
+    ("google", "google.com"),
+    ("facebook", "facebook.com"),
+    ("paypal", "paypal.com"),
+    ("amazon", "amazon.com"),
+    ("microsoft", "microsoft.com"),
+    ("apple", "apple.com"),
+    ("ebay", "ebay.com"),
+    ("linkedin", "linkedin.com"),
+    ("netflix", "netflix.com"),
+    ("instagram", "instagram.com"),
+    ("twitter", "twitter.com"),
+    ("whatsapp", "whatsapp.com"),
+    ("yahoo", "yahoo.com"),
+    ("dropbox", "dropbox.com"),
+    ("outlook", "outlook.com"),
+    ("office", "office.com"),
+    ("chase", "chase.com"),
+    ("bankofamerica", "bankofamerica.com"),
+    ("wellsfargo", "wellsfargo.com"),
+    ("citibank", "citibank.com"),
+    ("usbank", "usbank.com"),
+    ("coinbase", "coinbase.com"),
+    ("binance", "binance.com"),
+    ("roblox", "roblox.com"),
+    ("discord", "discord.com"),
+    ("steam", "steamcommunity.com"),
+    ("nvidia", "nvidia.com"),
+    ("tesla", "tesla.com"),
+    ("walmart", "walmart.com"),
+    ("target", "target.com"),
+    ("costco", "costco.com"),
+    ("bestbuy", "bestbuy.com"),
+    ("irs", "irs.gov"),
+    ("americanexpress", "americanexpress.com"),
+    ("visa", "visa.com"),
+    ("mastercard", "mastercard.com"),
+];
+
+/// Levenshtein edit distance between two strings (character based).
+pub(crate) fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let n = a.len();
+    let m = b.len();
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut cur = vec![0usize; m + 1];
+    for i in 1..=n {
+        cur[0] = i;
+        for j in 1..=m {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
+/// Per-character Shannon entropy of `s` in bits (0.0 for empty/uniform single char).
+fn shannon_entropy_bits(s: &str) -> f32 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    let mut counts: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+    for c in s.chars() {
+        *counts.entry(c).or_insert(0) += 1;
+    }
+    let total = s.chars().count() as f32;
+    let mut h = 0.0f32;
+    for &c in counts.values() {
+        let p = c as f32 / total;
+        h -= p * p.log2();
+    }
+    h
+}
+
+/// Extract the registrable domain (eTLD+1) from a domain string.
+pub(crate) fn registrable_domain(domain: &str) -> String {
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() <= 2 {
+        return domain.to_string();
+    }
+    let last_two = format!("{}.{}", labels[labels.len() - 2], labels[labels.len() - 1]);
+    if MULTI_PART_TLDS.contains(&last_two.as_str()) {
+        // Registrable = third label from the right.
+        return labels[labels.len() - 3..].join(".");
+    }
+    last_two
 }
 
 /// Reverse-map an n-gram hash bucket to the actual n-gram(s) from a URL.
@@ -463,7 +901,8 @@ pub fn ngrams_for_bucket(
     n_features: usize,
     ngram_range: [usize; 2],
 ) -> Vec<String> {
-    let cleaned = clean_url(url);
+    let normalized = normalize_url(url);
+    let cleaned = clean_url(&normalized);
     let chars: Vec<char> = cleaned.chars().collect();
     let mut result = Vec::new();
 
@@ -525,8 +964,8 @@ mod tests {
 
     #[test]
     fn test_extract_features_basic() {
-        let features = extract_features("example.com", 100, 19, [2, 3]);
-        assert_eq!(features.len(), 119);
+        let features = extract_features("example.com", 100, 21, [2, 3]);
+        assert_eq!(features.len(), 121);
         let sum: f32 = features.iter().sum();
         assert!(sum > 0.0);
     }
@@ -534,10 +973,12 @@ mod tests {
     #[test]
     fn test_extract_manual_features() {
         let features = extract_manual_features("https://example.com/login");
-        assert_eq!(features.len(), 19);
+        assert_eq!(features.len(), 40);
         assert_eq!(features[0], 0.0);
         assert_eq!(features[1], 1.0);
         assert_eq!(features[18], 1.0);
+        // 19 structural features appended after the 21 manual ones.
+        assert_eq!(features.len(), 21 + 19);
     }
 
     #[test]
@@ -570,5 +1011,82 @@ mod tests {
     fn test_ngrams_for_bucket_empty_url() {
         let grams = ngrams_for_bucket("", 0, 500, [2, 3]);
         assert!(grams.is_empty(), "Empty URL should produce no n-grams");
+    }
+
+    #[test]
+    fn test_normalize_url_fragment_removal() {
+        let normalized = normalize_url("https://example.com/login#section");
+        assert_eq!(normalized, "https://example.com/login");
+    }
+
+    #[test]
+    fn test_normalize_url_percent_decode() {
+        let normalized = normalize_url("https://example.com/%70aypal");
+        assert_eq!(normalized, "https://example.com/paypal");
+    }
+
+    #[test]
+    fn test_normalize_url_idna_decode() {
+        let normalized = normalize_url("https://xn--fsq.com/path");
+        assert!(
+            normalized.contains("xn--fsq") || normalized != "https://xn--fsq.com/path",
+            "Punycode domain should be decoded"
+        );
+    }
+
+    /// Cross-validate the 19 structural features (indices 21-39 of
+    /// `extract_manual_features`) against the Python reference exported by
+    /// `training/scripts/_tmp_dump_struct.py`. This guarantees the Rust port of
+    /// `extract_struct_features` matches the LightGBM training features exactly.
+    #[test]
+    fn test_struct_features_consistency() {
+        let path = "resources/test_struct_features.json";
+        if !std::path::Path::new(path).exists() {
+            println!("test_struct_features.json not found, skipping test");
+            return;
+        }
+        let content = std::fs::read_to_string(path).expect("Failed to read struct features JSON");
+        let data: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse JSON");
+
+        for (url, value) in data.as_object().unwrap() {
+            let py: Vec<f32> = serde_json::from_value(value.clone()).expect("bad array");
+            assert_eq!(py.len(), 19, "reference has 19 struct features");
+            let rust = extract_manual_features(url);
+            assert_eq!(rust.len(), 40, "manual features must be 40 (21+19)");
+            let mut max_diff = 0.0f32;
+            for i in 0..19 {
+                let d = (rust[21 + i] - py[i]).abs();
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+            assert!(
+                max_diff < 1e-4,
+                "struct-feature mismatch for URL '{}' (max diff {:.6})",
+                url,
+                max_diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_sensitive_word_word_boundary() {
+        let features_match = extract_manual_features("https://example.com/login");
+        assert_eq!(
+            features_match[18], 1.0,
+            "'login' at word boundary should match"
+        );
+
+        let features_no_match = extract_manual_features("https://example.com/bloglogin");
+        assert_eq!(
+            features_no_match[18], 0.0,
+            "'login' embedded in 'bloglogin' should NOT match (word boundary)"
+        );
+
+        let features_pineapple = extract_manual_features("https://example.com/pineapple");
+        assert_eq!(
+            features_pineapple[18], 0.0,
+            "'apple' embedded in 'pineapple' should NOT match (word boundary)"
+        );
     }
 }

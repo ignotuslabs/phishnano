@@ -1,7 +1,7 @@
 //! Model serialization and loading module.
 //!
 //! This module handles the serialization, deserialization, and loading of
-//! the Random Forest model used for phishing URL detection. The model is
+//! the phishing-URL detection model (a LightGBM-trained decision tree forest). The model is
 //! stored in two formats:
 //!
 //! - **JSON** (`model_data.json`): Human-readable format used during
@@ -10,8 +10,8 @@
 //!   into the library via `include_bytes!` for zero-configuration usage
 //!   in production.
 //!
-//! The bincode format is approximately 75% smaller than JSON, reducing
-//! the embedded model from ~419 KB to ~103 KB.
+//! The bincode format is approximately 48% smaller than JSON, reducing
+//! the embedded model from ~236 KB to ~123 KB.
 
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -55,7 +55,7 @@ const DEFAULT_MODEL_BYTES: &[u8] = include_bytes!("../resources/model_data.binco
 /// };
 /// assert_eq!(tree.value[0], 0.9);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tree {
     pub left: Vec<i32>,
     pub right: Vec<i32>,
@@ -64,13 +64,16 @@ pub struct Tree {
     pub value: Vec<f32>,
 }
 
-/// The complete Random Forest model for phishing URL detection.
+/// The complete decision tree forest model for phishing URL detection.
 ///
 /// # Fields
 ///
 /// - `n_features`: Number of n-gram hash features (typically 500)
-/// - `n_manual_features`: Number of manual engineered features (typically 19)
+/// - `n_manual_features`: Number of manual engineered features (typically 39:
+///   21 hand-crafted + 18 structural)
 /// - `ngram_range`: Character n-gram range `[min, max]` (typically `[2, 3]`)
+/// - `init_score`: LightGBM additive bias; the forest score is
+///   `sigmoid(init_score + Σ raw_leaf)` (0.0 for legacy sklearn exports)
 /// - `trees`: Collection of decision trees in the forest
 ///
 /// # Feature Layout
@@ -86,8 +89,9 @@ pub struct Tree {
 ///
 /// let model = Model {
 ///     n_features: 500,
-///     n_manual_features: 19,
+///     n_manual_features: 21,
 ///     ngram_range: [2, 3],
+///     init_score: 0.0,
 ///     trees: vec![Tree {
 ///         left: vec![-1],
 ///         right: vec![-1],
@@ -98,11 +102,17 @@ pub struct Tree {
 /// };
 /// assert_eq!(model.trees.len(), 1);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub n_features: usize,
     pub n_manual_features: usize,
     pub ngram_range: [usize; 2],
+    /// LightGBM additive-bias term. The production forest scores a URL as
+    /// `sigmoid(init_score + Σ raw_leaf)`. For legacy sklearn RandomForest
+    /// exports (which averaged leaf probabilities) this is `0.0`. Deserialized
+    /// with a default so older JSON models lacking the field still load.
+    #[serde(default)]
+    pub init_score: f32,
     pub trees: Vec<Tree>,
 }
 
@@ -130,6 +140,7 @@ impl Model {
     ///     n_features: 10,
     ///     n_manual_features: 5,
     ///     ngram_range: [2, 3],
+    ///     init_score: 0.0,
     ///     trees: vec![],
     /// };
     /// let features = model.extract_features("https://example.com");
@@ -269,7 +280,7 @@ pub fn load_model_from_bytes(data: &[u8]) -> Result<Model, anyhow::Error> {
 /// 1. Python `train.py` exports the model as JSON
 /// 2. CLI `--convert` calls this function to produce bincode
 /// 3. Bincode file is placed in `resources/model_data.bincode`
-/// 4. Library is rebuilt to embed the new bincode via `include_bytes!`
+/// 4. Library is rebuilt to embed the new bincode via the `include_bytes!` macro
 ///
 /// # Arguments
 ///
@@ -317,13 +328,15 @@ mod tests {
     use super::*;
 
     /// Verify that a Model can be serialized to bincode and back without
-    /// any data loss (round-trip test).
+    /// any data loss (round-trip test). Field-by-field comparison avoids
+    /// deriving PartialEq on f32-containing structs.
     #[test]
     fn test_model_serialization_roundtrip() {
         let model = Model {
             n_features: 10,
             n_manual_features: 5,
             ngram_range: [2, 3],
+            init_score: 0.0,
             trees: vec![Tree {
                 left: vec![-1],
                 right: vec![-1],
@@ -335,7 +348,23 @@ mod tests {
 
         let encoded = bincode::serialize(&model).unwrap();
         let decoded: Model = bincode::deserialize(&encoded).unwrap();
-        assert_eq!(model, decoded);
+        assert_eq!(model.n_features, decoded.n_features);
+        assert_eq!(model.n_manual_features, decoded.n_manual_features);
+        assert_eq!(model.ngram_range, decoded.ngram_range);
+        assert_eq!(model.trees.len(), decoded.trees.len());
+        for (a, b) in model.trees.iter().zip(decoded.trees.iter()) {
+            assert_eq!(a.left, b.left);
+            assert_eq!(a.right, b.right);
+            assert_eq!(a.feature, b.feature);
+            assert_eq!(a.threshold.len(), b.threshold.len());
+            for (x, y) in a.threshold.iter().zip(b.threshold.iter()) {
+                assert!((x - y).abs() < 1e-6, "threshold mismatch: {} vs {}", x, y);
+            }
+            assert_eq!(a.value.len(), b.value.len());
+            for (x, y) in a.value.iter().zip(b.value.iter()) {
+                assert!((x - y).abs() < 1e-6, "value mismatch: {} vs {}", x, y);
+            }
+        }
     }
 
     /// Verify that bincode produces a smaller output than JSON for the
@@ -344,8 +373,9 @@ mod tests {
     fn test_bincode_smaller_than_json() {
         let model = Model {
             n_features: 500,
-            n_manual_features: 19,
+            n_manual_features: 21,
             ngram_range: [2, 3],
+            init_score: 0.0,
             trees: vec![Tree {
                 left: vec![1, -1, -1],
                 right: vec![2, -1, -1],

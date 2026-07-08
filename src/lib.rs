@@ -1,7 +1,7 @@
 //! # phishnano
 //!
 //! Lightweight offline phishing URL detection library with an embedded
-//! Random Forest model. The model is compiled into the library at build
+//! decision tree forest model (LightGBM-trained). The model is compiled into the library at build
 //! time via `include_bytes!`, enabling zero-configuration, fully local
 //! inference with microsecond-level latency and no network requests.
 //!
@@ -13,7 +13,7 @@
 //!
 //! - **Offline & privacy-preserving**: 100% local inference, zero network
 //!   requests, no data leaves the host
-//! - **Lightweight**: ~110 KB embedded model (bincode format)
+//! - **Lightweight**: ~123 KB embedded model (bincode format)
 //! - **Low latency**: ~20 microseconds per URL on commodity hardware
 //! - **Zero configuration**: No runtime files, no API keys, no external
 //!   services
@@ -28,7 +28,7 @@
 //! let model = load_default_model().expect("Failed to load model");
 //! let score = predict_url("http://suspicious-site.com/login", &model);
 //!
-//! if score >= 0.45 {
+//! if score >= 0.20 {
 //!     println!("Phishing detected (score={:.4})", score);
 //! } else {
 //!     println!("URL is safe (score={:.4})", score);
@@ -49,12 +49,16 @@
 //!
 //! ## Architecture
 //!
-//! - **Model**: Random Forest with 25 decision trees, max depth 7
-//! - **Features**: 500 character n-gram hash features + 19 manual features
-//! - **Model size**: ~110 KB (bincode format, embedded)
+//! - **Model**: LightGBM Random Forest, 100 decision trees, max depth 7
+//!   (additive `sigmoid(init_score + Σ raw_leaf)` scoring)
+//! - **Features**: 500 character n-gram hash features + 39 manual features
+//!   (21 hand-crafted + 18 structural)
+//! - **Model size**: ~120 KB (bincode format, embedded)
+//! - **Scoring**: Two-stage — deterministic Stage-1 rule layer (whitelist /
+//!   brand-impersonation / high-risk TLD) + Stage-2 forest refinement
 //! - **Inference latency**: ~20 microseconds per URL
 //! - **Privacy**: 100% local inference, no network requests
-//! - **Default threshold**: 0.45 (scores >= 0.45 are classified as phishing)
+//! - **Default threshold**: 0.20 (scores >= 0.20 are classified as phishing)
 //!
 //! ## Modules
 //!
@@ -62,14 +66,15 @@
 //! - [`extractor`]: Feature extraction from URL strings
 //! - [`predictor`]: Decision tree traversal and scoring
 //! - [`indicators`]: Detailed risk indicator extraction
+//! - [`scoring`]: Two-stage scorer (Stage-1 rule layer + Stage-2 forest)
 //!
 //! ## Core API
 //!
 //! - [`load_default_model()`]: Load the embedded default model (zero config)
 //! - [`predict_url()`]: Predict phishing probability for a URL
 //! - [`predict_url_detailed()`]: Predict with risk indicators (explains _why_)
-//! - [`extract_features()`]: Extract the 519-dimensional feature vector
-//! - [`Model`]: The Random Forest model struct
+//! - [`extract_features()`]: Extract the 539-dimensional feature vector
+//! - [`Model`]: The decision tree forest model struct
 //! - [`Tree`]: A single decision tree in the forest
 //! - [`load_model_from_path()`]: Load a model from a file path
 //! - [`load_model_from_bytes()`]: Load a model from raw bytes
@@ -79,6 +84,7 @@ pub mod extractor;
 pub mod indicators;
 pub mod model;
 pub mod predictor;
+pub mod scoring;
 
 // Re-export the primary API for user convenience.
 pub use extractor::extract_features;
@@ -96,20 +102,23 @@ mod tests {
     use super::*;
 
     /// Integration test: verify that feature extraction produces a vector
-    /// of the expected length (500 n-gram + 19 manual = 519 features).
+    /// of the expected length (500 n-gram + 39 manual = 539 features).
     #[test]
     fn test_integration() {
-        let features = extract_features("example.com", 500, 19, [2, 3]);
-        assert_eq!(features.len(), 519);
+        let features = extract_features("example.com", 500, 39, [2, 3]);
+        assert_eq!(features.len(), 539);
     }
 
     /// Verify that the embedded default model loads successfully and has
-    /// the expected configuration (500 n-gram features, 19 manual features).
+    /// the expected configuration (500 n-gram features, 39 manual features).
+    /// Rust extracts 40 manual features (21 engineered + 19 structural); the
+    /// embedded legacy model (`n_manual_features = 39`) uses the first 39 and
+    /// ignores the trailing structural feature.
     #[test]
     fn test_embedded_model_loads() {
         let model = load_default_model().expect("Failed to load embedded model");
         assert_eq!(model.n_features, 500);
-        assert_eq!(model.n_manual_features, 19);
+        assert_eq!(model.n_manual_features, 39);
         assert!(!model.trees.is_empty(), "Model should have trees");
     }
 
@@ -118,18 +127,18 @@ mod tests {
     #[test]
     fn test_embedded_model_prediction() {
         let model = load_default_model().expect("Failed to load embedded model");
-        let normal_score = predict_url("http://example.com", &model);
+        let normal_score = predict_url("https://www.google.com", &model);
         let phishing_score = predict_url(
             "nobell.it/70ffb52d079109dca5664cce6f317373782/login.SkyPe.com",
             &model,
         );
         assert!(
-            normal_score < 0.45,
+            normal_score < 0.20,
             "Normal URL should score below threshold: {}",
             normal_score
         );
         assert!(
-            phishing_score >= 0.45,
+            phishing_score >= 0.20,
             "Phishing URL should score above threshold: {}",
             phishing_score
         );
