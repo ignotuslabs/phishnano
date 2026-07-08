@@ -144,25 +144,35 @@ mod tests {
     }
 
     /// Cross-validate Rust feature extraction against Python reference data.
-    /// This test loads `resources/test_features.json` (if present) and
-    /// compares the Rust-extracted features against the Python-extracted
+    /// `resources/test_features.json` is embedded at compile time via
+    /// `include_str!` and its features are compared against the Rust-extracted
     /// features for each URL. This ensures feature consistency between
-    /// training (Python) and inference (Rust).
+    /// training (Python) and inference (Rust). The fixture is required: if it
+    /// fails to parse, the test panics rather than silently passing.
     #[test]
     fn test_feature_extraction_consistency() {
-        let json_path = "resources/test_features.json";
-        if !std::path::Path::new(json_path).exists() {
-            println!("test_features.json not found, skipping test");
-            return;
-        }
-        let content =
-            std::fs::read_to_string(json_path).expect("Failed to read test_features.json");
-        let data: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse JSON");
+        let content = include_str!("../resources/test_features.json");
+        let data: serde_json::Value = serde_json::from_str(content).expect("Failed to parse JSON");
 
         for (url, value) in data.as_object().unwrap() {
             let cleaned = value["cleaned"].as_str().unwrap();
             let py_features: Vec<f32> = serde_json::from_value(value["features"].clone()).unwrap();
             let rust_features = extract_features(url, 500, 0, [2, 3]);
+
+            // Guard against the Python reference silently dropping a dimension:
+            // `zip` would otherwise truncate to the shorter vector and hide the gap.
+            assert_eq!(
+                py_features.len(),
+                500,
+                "Python reference must export 500 features for URL: {}",
+                url
+            );
+            assert_eq!(
+                rust_features.len(),
+                500,
+                "Rust extract_features must return 500 features for URL: {}",
+                url
+            );
 
             let py_nonzero: Vec<(usize, f32)> = py_features
                 .iter()

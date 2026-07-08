@@ -1036,17 +1036,14 @@ mod tests {
 
     /// Cross-validate the 19 structural features (indices 21-39 of
     /// `extract_manual_features`) against the Python reference exported by
-    /// `training/scripts/_tmp_dump_struct.py`. This guarantees the Rust port of
-    /// `extract_struct_features` matches the LightGBM training features exactly.
+    /// `training/scripts/_tmp_dump_struct.py`, embedded at compile time via
+    /// `include_str!`. This guarantees the Rust port of `extract_struct_features`
+    /// matches the LightGBM training features exactly. The fixture is required:
+    /// if it fails to parse, the test panics rather than silently passing.
     #[test]
     fn test_struct_features_consistency() {
-        let path = "resources/test_struct_features.json";
-        if !std::path::Path::new(path).exists() {
-            println!("test_struct_features.json not found, skipping test");
-            return;
-        }
-        let content = std::fs::read_to_string(path).expect("Failed to read struct features JSON");
-        let data: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse JSON");
+        let content = include_str!("../resources/test_struct_features.json");
+        let data: serde_json::Value = serde_json::from_str(content).expect("Failed to parse JSON");
 
         for (url, value) in data.as_object().unwrap() {
             let py: Vec<f32> = serde_json::from_value(value.clone()).expect("bad array");
