@@ -54,8 +54,7 @@
 //! - **Features**: 500 character n-gram hash features + 39 manual features
 //!   (21 hand-crafted + 18 structural)
 //! - **Model size**: ~120 KB (bincode format, embedded)
-//! - **Scoring**: Two-stage — deterministic Stage-1 rule layer (whitelist /
-//!   brand-impersonation / high-risk TLD) + Stage-2 forest refinement
+//! - **Scoring**: Whitelist safety net (zero ML volume) + decision tree forest
 //! - **Inference latency**: ~20 microseconds per URL
 //! - **Privacy**: 100% local inference, no network requests
 //! - **Default threshold**: 0.20 (scores >= 0.20 are classified as phishing)
@@ -66,7 +65,7 @@
 //! - [`extractor`]: Feature extraction from URL strings
 //! - [`predictor`]: Decision tree traversal and scoring
 //! - [`indicators`]: Detailed risk indicator extraction
-//! - [`scoring`]: Two-stage scorer (Stage-1 rule layer + Stage-2 forest)
+//! - [`scoring`]: Whitelist-backed scorer (whitelist safety net + forest)
 //!
 //! ## Core API
 //!

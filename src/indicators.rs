@@ -32,7 +32,6 @@
 use crate::extractor::{extract_manual_features, ngrams_for_bucket};
 use crate::model::Model;
 use crate::predictor::{predict_tree_with_path, predict_url};
-use crate::scoring::{analyze_stage1, Stage1Category};
 use std::collections::HashMap;
 
 /// Maximum number of indicators to return.
@@ -189,22 +188,6 @@ pub fn predict_url_detailed(url: &str, model: &Model) -> Prediction {
             indicators.push(Indicator {
                 category,
                 description: desc,
-                weight: 0.5,
-                source: IndicatorSource::Heuristic,
-            });
-        }
-    }
-
-    // Priority 3: Stage-1 deterministic verdict. When Stage 1 classifies the
-    // URL as phishing (brand impersonation or high-risk TLD), surface that as
-    // a heuristic Domain indicator so users understand the rule-based signal
-    // even when the forest contributes little.
-    if indicators.len() < MAX_INDICATORS {
-        let s1 = analyze_stage1(url);
-        if let (Stage1Category::Phishing, Some(reason)) = (s1.category, s1.reason) {
-            indicators.push(Indicator {
-                category: IndicatorCategory::Domain,
-                description: reason.to_string(),
                 weight: 0.5,
                 source: IndicatorSource::Heuristic,
             });

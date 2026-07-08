@@ -179,12 +179,12 @@ pub fn predict_tree_with_path(tree: &Tree, features: &[f32]) -> (f32, Vec<PathSt
     (0.0, path)
 }
 
-/// Pure Random-Forest score (Stage 2 only, no Stage-1 rule layer).
+/// Pure forest score (no whitelist layer).
 ///
-/// This is the raw forest component used internally by the two-stage
+/// This is the raw forest component used internally by the
 /// [`crate::scoring::score_url`] scorer. Most callers should use
-/// [`predict_url`], which applies the full two-stage pipeline
-/// (deterministic whitelist / brand / high-risk-TLD layer + forest refinement).
+/// [`predict_url`], which applies the full pipeline
+/// (whitelist safety net + forest refinement).
 ///
 /// # Panics
 ///
@@ -220,12 +220,12 @@ pub(crate) fn predict_forest(url: &str, model: &Model) -> f32 {
     sigmoid(model.init_score + raw)
 }
 
-/// Predict the phishing probability of a URL using the full two-stage pipeline.
+/// Predict the phishing probability of a URL using the full pipeline.
 ///
 /// This is the main entry point for phishing detection. It applies the
-/// deterministic **Stage-1** rule layer (whitelist fix / brand-impersonation
-/// / high-risk TLD) and refines with the embedded **decision tree forest** (Stage 2).
-/// See [`crate::scoring`] for the architecture and rationale.
+/// deterministic **whitelist safety net** and refines with the embedded
+/// **decision tree forest**. See [`crate::scoring`] for the architecture and
+/// rationale.
 ///
 /// # Arguments
 ///
