@@ -20,7 +20,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phishnano = "0.2"
+phishnano = "0.1"
 ```
 
 ```rust
