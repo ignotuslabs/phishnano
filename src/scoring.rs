@@ -20,8 +20,7 @@
 use crate::extractor::registrable_domain;
 use crate::model::Model;
 use crate::predictor::predict_forest;
-use std::collections::HashSet;
-use std::sync::OnceLock;
+use once_cell::sync::Lazy;
 
 /// Embedded whitelist: the top-N most-popular registrable domains from the
 /// Tranco/Alexa Top 1M snapshot (see `build_whitelist.py`).
@@ -75,9 +74,8 @@ const COMMON_SUBDOMAINS: &[&str] = &[
     "us", "uk", "eu",
 ];
 
-fn common_subdomain_set() -> &'static HashSet<&'static str> {
-    static S: OnceLock<HashSet<&'static str>> = OnceLock::new();
-    S.get_or_init(|| COMMON_SUBDOMAINS.iter().copied().collect())
+fn common_subdomain_set() -> &'static [&'static str] {
+    COMMON_SUBDOMAINS
 }
 
 // ---------------------------------------------------------------------------
@@ -85,8 +83,7 @@ fn common_subdomain_set() -> &'static HashSet<&'static str> {
 // ---------------------------------------------------------------------------
 
 fn whitelist_store() -> &'static Vec<&'static str> {
-    static LIST: OnceLock<Vec<&'static str>> = OnceLock::new();
-    LIST.get_or_init(|| {
+    static LIST: Lazy<Vec<&'static str>> = Lazy::new(|| {
         let bytes = WHITELIST_BYTES;
         if bytes.len() < 4 {
             return Vec::new();
@@ -110,7 +107,8 @@ fn whitelist_store() -> &'static Vec<&'static str> {
             pos += len;
         }
         domains
-    })
+    });
+    &LIST
 }
 
 /// Is `reg` a whitelisted (known-good) registrable domain?
@@ -199,8 +197,8 @@ fn whitelist_verdict(reg: &str, host: &str) -> (Stage1Category, f32, Option<&'st
     if is_whitelisted(reg) {
         let sub = subdomain_of(host, reg);
         let benign_sub = sub.is_empty()
-            || common_subdomain_set().contains(sub.as_str())
-            || sub.split('.').all(|p| common_subdomain_set().contains(p));
+            || common_subdomain_set().contains(&sub.as_str())
+            || sub.split('.').all(|p| common_subdomain_set().contains(&p));
         if benign_sub {
             return (
                 Stage1Category::Normal,

@@ -26,31 +26,31 @@
 //! the Rust inference results to differ from the Python training metrics.
 
 use percent_encoding::percent_decode_str;
+use once_cell::sync::Lazy;
 use regex::Regex;
-use std::sync::OnceLock;
 
 /// Returns a static reference to the protocol-stripping regex.
 ///
 /// Matches `http://` or `https://` at the start of the URL string (case-insensitive).
 fn protocol_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)^https?://").unwrap())
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^https?://").unwrap());
+    &RE
 }
 
 /// Returns a static reference to the digit-matching regex.
 ///
 /// Matches any single digit character (0-9) for digit normalization.
 fn digit_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\d").unwrap())
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d").unwrap());
+    &RE
 }
 
 /// Returns a static reference to the IPv4-matching regex.
 ///
 /// Matches raw IPv4 address patterns at the start of the domain portion.
 fn ip_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\d+\.\d+\.\d+\.\d+").unwrap())
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\d+\.\d+\.\d+\.\d+").unwrap());
+    &RE
 }
 
 /// Returns a static reference to the sensitive-word regex.
@@ -59,10 +59,10 @@ fn ip_regex() -> &'static Regex {
 /// Word boundaries are `\b` (transition between `\w` and `\W`),
 /// so `login` in `/login/` matches but `login` in `bloglogin` does not.
 pub(crate) fn sensitive_word_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
+    static RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)\b(login|signin|verify|account|password|secure|update|bank|paypal|facebook|google|apple|amazon|ebay|microsoft|yahoo|linkedin)\b").unwrap()
-    })
+    });
+    &RE
 }
 
 /// MurmurHash3 x86 32-bit hash function.
