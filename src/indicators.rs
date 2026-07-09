@@ -287,6 +287,71 @@ fn manual_feature_indicator(
             IndicatorCategory::Domain,
             format!("Random / high-entropy subdomain (entropy {:.2})", val),
         )),
+        // --- Structural features (indices 21-38) ---
+        21 if val >= 5.0 => Some((
+            IndicatorCategory::Structure,
+            format!("Deep path structure ({} levels)", val as i32),
+        )),
+        22 if val >= 5.0 => Some((
+            IndicatorCategory::Structure,
+            format!("Excessive query parameters ({})", val as i32),
+        )),
+        23 if val == 1.0 => Some((
+            IndicatorCategory::Domain,
+            "Explicit port number in URL".to_string(),
+        )),
+        24 if val >= 1.0 => Some((
+            IndicatorCategory::Domain,
+            "Non-standard port number (>= 1000)".to_string(),
+        )),
+        25 if val > 0.5 => Some((
+            IndicatorCategory::Structure,
+            format!("High hexadecimal character ratio ({:.2})", val),
+        )),
+        26 if val < 0.3 => Some((
+            IndicatorCategory::Structure,
+            format!("Low alphabetic character ratio ({:.2})", val),
+        )),
+        27 if val > 0.1 => Some((
+            IndicatorCategory::Structure,
+            format!("High uppercase ratio (obfuscation) ({:.2})", val),
+        )),
+        28 if val >= 20.0 => Some((
+            IndicatorCategory::Domain,
+            format!("Abnormally long domain label ({} chars)", val as i32),
+        )),
+        29 if val >= 5.0 => Some((
+            IndicatorCategory::Domain,
+            format!("Excessive domain label count ({})", val as i32),
+        )),
+        30 if val >= 15.0 => Some((
+            IndicatorCategory::Domain,
+            format!("Long average domain label length ({:.1})", val),
+        )),
+        31 if val > 0.3 => Some((
+            IndicatorCategory::Domain,
+            format!("High digit ratio in domain ({:.2})", val),
+        )),
+        32 if val >= 0.7 => Some((
+            IndicatorCategory::Domain,
+            format!("High domain entropy ({:.2})", val),
+        )),
+        35 if val == 1.0 => Some((
+            IndicatorCategory::Structure,
+            "Double-slash obfuscation in path".to_string(),
+        )),
+        36 if val == 1.0 => Some((
+            IndicatorCategory::Domain,
+            "Domain label ends with hyphen".to_string(),
+        )),
+        37 if val == 1.0 => Some((
+            IndicatorCategory::Domain,
+            "Domain label starts with digit".to_string(),
+        )),
+        38 if val == 1.0 => Some((
+            IndicatorCategory::Domain,
+            "Dangerous URL scheme (data:/javascript:)".to_string(),
+        )),
         _ => None,
     }
 }

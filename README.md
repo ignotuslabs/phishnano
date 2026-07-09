@@ -64,9 +64,9 @@ Measured on a time-split held-out evaluation set (100k URLs, 50k phishing /
 | Default threshold | 0.20 |
 
 > The bundled model ships at threshold **0.20** to maximize phishing recall.
-> The scorer is a whitelist safety net plus the forest: whitelisted,
-> structurally-benign domains are floored at **0.1** (`max(0.1, forest)`), while
-> every other URL defers entirely to the forest.
+> The scorer delegates entirely to the embedded decision tree forest, which
+> produces a calibrated phishing probability via
+> `sigmoid(init_score + Σ raw_leaf)`.
 
 ## CLI Tool
 
@@ -102,13 +102,12 @@ phishnano/
 |   |-- model.rs              # Model struct, load_default_model(), include_bytes!
 |   |-- extractor.rs          # Feature extraction (n-gram + manual + structural)
 |   |-- predictor.rs          # Decision tree traversal and scoring
-|   |-- scoring.rs            # Whitelist-backed scorer (whitelist safety net + forest)
+|   |-- scoring.rs            # Production scorer (delegates to the decision tree forest)
 |   `-- bin/
 |       `-- phishnano-cli.rs  # CLI binary
 |-- resources/                # Model files
 |   |-- model_data.bincode    # Embedded bincode model (~123 KB)
 |   |-- model_data.json       # JSON model for debugging
-|   |-- whitelist.bin         # Embedded whitelist (top domains)
 |   |-- test_features.json    # Cross-language test data (n-gram)
 |   `-- test_struct_features.json # Cross-language test data (structural)
 |-- training/                 # Training scripts (gitignored, not published)
@@ -145,22 +144,14 @@ Each URL is converted to a **539-dimensional** feature vector:
   extra trailing structural feature kept for training-pipeline alignment);
   the embedded model uses the first 39 and ignores the trailing one.
 
-### Scoring: whitelist safety net + forest
+### Scoring: decision tree forest
 
-1. **Whitelist safety net (deterministic, zero ML volume)**: Qualifies the
-   registrable domain (eTLD+1):
-   - Whitelisted, structurally-benign domain (e.g. `mail.google.com`) →
-     floored at a fixed low score **0.1** via `max(0.1, forest)`. This removes
-     false positives on popular legitimate sites that the forest would
-     otherwise mislabel, with **zero phishing-recall cost** (top-1m domains are
-     essentially never phishing, and a forest score ≥ threshold still wins).
-   - Unusual subdomain on a whitelisted domain, or any non-whitelisted domain →
-     defer to the forest.
-2. **Forest**: `sigmoid(init_score + Σ raw_leaf)` — the LightGBM additive
-   scoring semantics.
+The scorer delegates entirely to the embedded LightGBM decision tree forest.
+The forest produces a calibrated phishing probability in `[0, 1]` via
+`sigmoid(init_score + Σ raw_leaf)` — the LightGBM additive scoring semantics.
+The default classification threshold is **0.20**.
 
-Final score = `max(0.1, forest)` for whitelisted-benign URLs (or `forest` when
-the forest independently flags them), and `forest` for everything else.
+Final score = `forest`.
 
 ## CI/CD
 

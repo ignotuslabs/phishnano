@@ -1,6 +1,6 @@
 [package]
 name = "phishnano"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight offline phishing URL detection library with embedded Random Forest model, microsecond local inference, and zero network requests"
 license = "MIT OR Apache-2.0"
@@ -23,7 +23,6 @@ include = [
     "resources/model_data.json",
     "resources/test_features.json",
     "resources/test_struct_features.json",
-    "resources/whitelist.bin",
     "README.md",
     "LICENSE-MIT",
     "LICENSE-APACHE",

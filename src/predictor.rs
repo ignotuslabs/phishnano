@@ -186,12 +186,11 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// Pure forest score (no whitelist layer).
+/// Pure forest score (no rule layer).
 ///
 /// This is the raw forest component used internally by the
 /// [`crate::scoring::score_url`] scorer. Most callers should use
-/// [`predict_url`], which applies the full pipeline
-/// (whitelist safety net + forest refinement).
+/// [`predict_url`], which delegates to [`score_url`].
 ///
 /// # Panics
 ///
@@ -220,12 +219,11 @@ pub(crate) fn predict_forest(url: &str, model: &Model) -> f32 {
     sigmoid(model.init_score + raw)
 }
 
-/// Predict the phishing probability of a URL using the full pipeline.
+/// Predict the phishing probability of a URL using the embedded forest.
 ///
-/// This is the main entry point for phishing detection. It applies the
-/// deterministic **whitelist safety net** and refines with the embedded
-/// **decision tree forest**. See [`crate::scoring`] for the architecture and
-/// rationale.
+/// This is the main entry point for phishing detection. It delegates to
+/// [`crate::scoring::score_url`], which returns the forest's calibrated
+/// phishing probability. See [`crate::scoring`] for details.
 ///
 /// # Arguments
 ///

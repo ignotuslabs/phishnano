@@ -54,7 +54,7 @@
 //! - **Features**: 500 character n-gram hash features + 39 manual features
 //!   (21 hand-crafted + 18 structural)
 //! - **Model size**: ~120 KB (bincode format, embedded)
-//! - **Scoring**: Whitelist safety net (zero ML volume) + decision tree forest
+//! - **Scoring**: Decision tree forest (LightGBM additive sigmoid scoring)
 //! - **Inference latency**: ~20 microseconds per URL
 //! - **Privacy**: 100% local inference, no network requests
 //! - **Default threshold**: 0.20 (scores >= 0.20 are classified as phishing)
@@ -65,7 +65,7 @@
 //! - [`extractor`]: Feature extraction from URL strings
 //! - [`predictor`]: Decision tree traversal and scoring
 //! - [`indicators`]: Detailed risk indicator extraction
-//! - [`scoring`]: Whitelist-backed scorer (whitelist safety net + forest)
+//! - [`scoring`]: Production scorer (delegates to the decision tree forest)
 //!
 //! ## Core API
 //!
