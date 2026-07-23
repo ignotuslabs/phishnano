@@ -1,6 +1,6 @@
 [package]
 name = "phishnano"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 description = "Lightweight offline phishing URL detection library with embedded Random Forest model, microsecond local inference, and zero network requests"
 license = "MIT OR Apache-2.0"

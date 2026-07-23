@@ -42,7 +42,11 @@ const MAX_INDICATORS: usize = 5;
 const MIN_TREE_VOTES: usize = 3;
 
 /// The result of a detailed phishing URL prediction.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` is derived so consumers can assert/compare two predictions in
+/// tests. `Eq`/`Hash` are intentionally **not** derived because `score` is
+/// `f32` (NaN is not reflexively equal).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Prediction {
     /// Phishing probability score (0.0 = definitely normal, 1.0 = definitely phishing).
     pub score: f32,
@@ -51,7 +55,10 @@ pub struct Prediction {
 }
 
 /// A single risk indicator.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` is derived so consumers can compare/dedupe indicators. `Eq`/
+/// `Hash` are intentionally **not** derived because `weight` is `f32`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Indicator {
     /// Coarse category of the risk factor (domain / path / structure / n-gram).
     pub category: IndicatorCategory,
@@ -69,7 +76,10 @@ pub struct Indicator {
 }
 
 /// Category of a risk indicator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Implements `Copy`, `Hash`, and `Eq` (all variants are fieldless unit
+/// variants) so it can be used as a `HashMap`/`HashSet` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IndicatorCategory {
     /// Related to the domain (IP usage, TLD, subdomain structure).
     Domain,
@@ -91,8 +101,12 @@ pub enum IndicatorCategory {
 ///
 /// This enum is `#[non_exhaustive]`: new risk types may be added in future
 /// versions, so downstream `match` expressions must include a `_` arm.
+///
+/// Implements `Copy`, `Hash`, and `Eq` (all variants are fieldless unit
+/// variants) so consumers can use it as a `HashMap`/`HashSet` key for
+/// grouping or counting indicators by risk type.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IndicatorGroup {
     // --- Domain-related ---
     /// Domain length abnormally long.
@@ -162,7 +176,11 @@ pub enum IndicatorGroup {
 }
 
 /// The source of an indicator.
-#[derive(Debug, Clone)]
+///
+/// Implements `Copy`, `Hash`, and `Eq` so it can be used as a
+/// `HashMap`/`HashSet` key (all field types are `usize`, which is
+/// `Copy + Eq + Hash`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IndicatorSource {
     /// Derived from model decision path tracing.
     /// `tree_count` = how many trees used this feature; `total_trees` = forest size.

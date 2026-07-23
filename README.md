@@ -49,6 +49,7 @@ strings:
 
 ```rust
 use phishnano::{load_default_model, predict_url_detailed, IndicatorGroup};
+use std::collections::HashMap;
 
 let model = load_default_model()?;
 let result = predict_url_detailed("http://192.168.1.1/login", &model);
@@ -58,13 +59,24 @@ for ind in &result.indicators {
     println!("  [{}] {}", ind.group, ind.description);
 }
 
-// Aggregate by risk type — match on a precise enum, not string parsing
+// `IndicatorGroup` implements Hash + Copy + Eq, so it can be a HashMap key:
+let mut counts: HashMap<&IndicatorGroup, usize> = HashMap::new();
+for ind in &result.indicators {
+    *counts.entry(&ind.group).or_insert(0) += 1;
+}
+
+// Or match on a precise enum value, not string parsing
 let has_ip = result
     .indicators
     .iter()
     .any(|i| i.group == IndicatorGroup::IpAddress);
 ```
 
+> `IndicatorGroup`, `IndicatorCategory`, and `IndicatorSource` all implement
+> `Copy`, `Hash`, and `Eq`, making them usable as `HashMap`/`HashSet` keys for
+> grouping or deduplication. `Indicator` and `Prediction` derive `PartialEq`
+> (but not `Eq`/`Hash`, since they contain `f32` weights/scores).
+>
 > `IndicatorGroup` is `#[non_exhaustive]`: new risk types may be added in
 > future versions, so downstream `match` expressions must include a `_` arm.
 
