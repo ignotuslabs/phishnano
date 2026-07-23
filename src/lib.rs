@@ -89,8 +89,7 @@ pub mod scoring;
 // Re-export the primary API for user convenience.
 pub use extractor::extract_features;
 pub use indicators::{
-    predict_url_detailed, Indicator, IndicatorCategory, IndicatorGroup, IndicatorSource,
-    Prediction,
+    predict_url_detailed, Indicator, IndicatorCategory, IndicatorGroup, IndicatorSource, Prediction,
 };
 pub use model::{
     convert_json_to_bincode, load_default_model, load_model_from_bytes, load_model_from_path,

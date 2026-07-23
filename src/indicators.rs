@@ -244,9 +244,7 @@ pub fn predict_url_detailed(url: &str, model: &Model) -> Prediction {
                 continue;
             }
             let val = manual_features[manual_idx];
-            if let Some((category, group, desc)) =
-                manual_feature_indicator(manual_idx, val, url)
-            {
+            if let Some((category, group, desc)) = manual_feature_indicator(manual_idx, val, url) {
                 covered_manual.push(manual_idx);
                 indicators.push(Indicator {
                     category,
