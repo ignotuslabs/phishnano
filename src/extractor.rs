@@ -13,8 +13,9 @@
 //!
 //! 2. **Manual engineered features** (indices `n_features` to
 //!    `n_features + n_manual_features - 1`):
-//!    39 hand-crafted features (21 manual + 18 additional
-//!    structural features appended by `extract_struct_features`) capturing
+//!    39 hand-crafted features (21 manual + 18 structural used by the
+//!    model; `extract_struct_features` computes 19, the trailing one is
+//!    ignored at inference for training-pipeline alignment) capturing
 //!    URL properties such as length, special character counts, TLD category,
 //!    path/query structure, label statistics, port, and presence of sensitive
 //!    keywords (e.g., "login", "verify", "paypal").
@@ -301,7 +302,7 @@ pub(crate) fn extract_struct_features(
     domain: &str,
     path: &str,
 ) -> Vec<f32> {
-    let mut feats: Vec<f32> = Vec::with_capacity(18);
+    let mut feats: Vec<f32> = Vec::with_capacity(19);
 
     // 0: path_depth -- number of non-empty '/' segments in the path.
     if path.is_empty() {
@@ -482,7 +483,8 @@ pub(crate) fn extract_struct_features(
 ///
 /// # Returns
 ///
-/// A vector of 39 floating-point feature values (21 manual + 18 structural).
+/// A vector of 40 floating-point feature values (21 manual + 19 structural;
+/// the embedded model uses the first 39, ignoring the trailing structural feature).
 ///
 /// # Examples
 ///

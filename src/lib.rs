@@ -52,7 +52,8 @@
 //! - **Model**: LightGBM Random Forest, 100 decision trees, max depth 7
 //!   (additive `sigmoid(init_score + Σ raw_leaf)` scoring)
 //! - **Features**: 500 character n-gram hash features + 39 manual features
-//!   (21 hand-crafted + 18 structural)
+//!   (21 hand-crafted + 18 structural; Rust computes 19 structural, the
+//!   trailing one is ignored at inference for training-pipeline alignment)
 //! - **Model size**: ~120 KB (bincode format, embedded)
 //! - **Scoring**: Decision tree forest (LightGBM additive sigmoid scoring)
 //! - **Inference latency**: ~20 microseconds per URL
@@ -88,7 +89,8 @@ pub mod scoring;
 // Re-export the primary API for user convenience.
 pub use extractor::extract_features;
 pub use indicators::{
-    predict_url_detailed, Indicator, IndicatorCategory, IndicatorSource, Prediction,
+    predict_url_detailed, Indicator, IndicatorCategory, IndicatorGroup, IndicatorSource,
+    Prediction,
 };
 pub use model::{
     convert_json_to_bincode, load_default_model, load_model_from_bytes, load_model_from_path,

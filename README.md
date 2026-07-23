@@ -39,6 +39,35 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Detailed Prediction with Risk Indicators
+
+For use cases that need to explain _why_ a URL was flagged (security reports,
+tooltips, dashboards), use [`predict_url_detailed`]. It returns the score plus
+up to 5 risk indicators. Each indicator carries a stable [`IndicatorGroup`]
+enum so consumers can aggregate by risk type without parsing description
+strings:
+
+```rust
+use phishnano::{load_default_model, predict_url_detailed, IndicatorGroup};
+
+let model = load_default_model()?;
+let result = predict_url_detailed("http://192.168.1.1/login", &model);
+
+println!("Score: {:.4}", result.score);
+for ind in &result.indicators {
+    println!("  [{}] {}", ind.group, ind.description);
+}
+
+// Aggregate by risk type — match on a precise enum, not string parsing
+let has_ip = result
+    .indicators
+    .iter()
+    .any(|i| i.group == IndicatorGroup::IpAddress);
+```
+
+> `IndicatorGroup` is `#[non_exhaustive]`: new risk types may be added in
+> future versions, so downstream `match` expressions must include a `_` arm.
+
 ## Use Cases
 
 - **Password managers**: Warn users before autofilling credentials on suspicious login pages

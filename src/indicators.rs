@@ -53,9 +53,13 @@ pub struct Prediction {
 /// A single risk indicator.
 #[derive(Debug, Clone)]
 pub struct Indicator {
-    /// Category of the risk factor.
+    /// Coarse category of the risk factor (domain / path / structure / n-gram).
     pub category: IndicatorCategory,
-    /// Human-readable description of the risk.
+    /// Fine-grained, stable risk type. Consumers should aggregate/match on
+    /// this rather than parsing [`description`](Self::description).
+    pub group: IndicatorGroup,
+    /// Human-readable description of the risk (may change between versions;
+    /// do not rely on its exact wording for programmatic decisions).
     pub description: String,
     /// Contribution weight (0.0-1.0). Model indicators use `tree_count/total_trees`;
     /// heuristic indicators use a fixed 0.5.
@@ -75,6 +79,86 @@ pub enum IndicatorCategory {
     Structure,
     /// Related to character n-gram patterns detected by the model.
     NGram,
+}
+
+/// Fine-grained, stable risk type of an indicator.
+///
+/// Unlike [`IndicatorCategory`] (a coarse 4-value bucket), `IndicatorGroup`
+/// identifies the *specific* risk type (e.g. "IP address", "domain
+/// impersonation", "sensitive keyword") so consumers can aggregate and match
+/// on a precise enum value instead of parsing the human-readable
+/// [`description`](Indicator::description) string.
+///
+/// This enum is `#[non_exhaustive]`: new risk types may be added in future
+/// versions, so downstream `match` expressions must include a `_` arm.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndicatorGroup {
+    // --- Domain-related ---
+    /// Domain length abnormally long.
+    DomainLengthAbnormal,
+    /// URL uses an IP literal instead of a domain name.
+    IpAddress,
+    /// Excessive subdomain levels.
+    ExcessiveSubdomains,
+    /// Domain closely resembles a known brand (impersonation).
+    DomainImpersonation,
+    /// Random / high-entropy subdomain.
+    HighEntropySubdomain,
+    /// Explicit port number present.
+    ExplicitPort,
+    /// Non-standard port number (>= 1000).
+    NonStandardPort,
+    /// Abnormally long single domain label.
+    LongDomainLabel,
+    /// Excessive number of domain labels.
+    ExcessiveDomainLabels,
+    /// Long average domain label length.
+    LongAvgDomainLabel,
+    /// High digit-to-character ratio in the domain.
+    HighDomainDigitRatio,
+    /// High Shannon entropy of the domain.
+    HighDomainEntropy,
+    /// A domain label ends with a hyphen.
+    TrailingHyphenLabel,
+    /// A domain label starts with a digit.
+    LeadingDigitLabel,
+    /// Dangerous URL scheme (data: / javascript:).
+    DangerousScheme,
+
+    // --- Path-related ---
+    /// Path length abnormally long.
+    PathLengthAbnormal,
+    /// Contains a sensitive keyword (login/verify/paypal/...).
+    SensitiveKeyword,
+    /// Deep path structure (many levels).
+    DeepPathStructure,
+    /// Excessive query parameters.
+    ExcessiveQueryParams,
+
+    // --- Structure-related ---
+    /// Overall URL length abnormally long.
+    UrlLengthAbnormal,
+    /// Excessive hyphens in the URL.
+    ExcessiveHyphens,
+    /// Contains `@` symbol (URL obfuscation).
+    AtSymbol,
+    /// High percent-encoding usage.
+    PercentEncoding,
+    /// High digit-to-character ratio in the URL.
+    HighDigitRatio,
+    /// High hexadecimal character ratio.
+    HighHexRatio,
+    /// Low alphabetic character ratio.
+    LowAlphabeticRatio,
+    /// High uppercase ratio (obfuscation).
+    HighUppercaseRatio,
+    /// Double-slash obfuscation in the path.
+    DoubleSlashObfuscation,
+
+    // --- Model n-gram ---
+    /// Suspicious character n-gram pattern detected by the model.
+    SuspiciousNGram,
 }
 
 /// The source of an indicator.
@@ -160,10 +244,13 @@ pub fn predict_url_detailed(url: &str, model: &Model) -> Prediction {
                 continue;
             }
             let val = manual_features[manual_idx];
-            if let Some((category, desc)) = manual_feature_indicator(manual_idx, val, url) {
+            if let Some((category, group, desc)) =
+                manual_feature_indicator(manual_idx, val, url)
+            {
                 covered_manual.push(manual_idx);
                 indicators.push(Indicator {
                     category,
+                    group,
                     description: desc,
                     weight: *tree_count as f32 / total_trees.max(1) as f32,
                     source: IndicatorSource::Model {
@@ -183,10 +270,11 @@ pub fn predict_url_detailed(url: &str, model: &Model) -> Prediction {
         if covered_manual.contains(&idx) {
             continue;
         }
-        if let Some((category, desc)) = manual_feature_indicator(idx, val, url) {
+        if let Some((category, group, desc)) = manual_feature_indicator(idx, val, url) {
             covered_manual.push(idx);
             indicators.push(Indicator {
                 category,
+                group,
                 description: desc,
                 weight: 0.5,
                 source: IndicatorSource::Heuristic,
@@ -206,6 +294,7 @@ pub fn predict_url_detailed(url: &str, model: &Model) -> Prediction {
             if let Some(best) = ngrams.iter().max_by_key(|g| g.len()) {
                 indicators.push(Indicator {
                     category: IndicatorCategory::NGram,
+                    group: IndicatorGroup::SuspiciousNGram,
                     description: format!("Suspicious character pattern: '{}'", best),
                     weight: *tree_count as f32 / total_trees.max(1) as f32,
                     source: IndicatorSource::Model {
@@ -222,53 +311,66 @@ pub fn predict_url_detailed(url: &str, model: &Model) -> Prediction {
 
 /// Check a manual feature for abnormality and return an indicator if abnormal.
 ///
-/// Returns `Some((category, description))` if the feature value triggers a
-/// risk indicator, `None` otherwise.
+/// Returns `Some((category, group, description))` if the feature value
+/// triggers a risk indicator, `None` otherwise.
 fn manual_feature_indicator(
     idx: usize,
     val: f32,
     url: &str,
-) -> Option<(IndicatorCategory, String)> {
+) -> Option<(IndicatorCategory, IndicatorGroup, String)> {
     match idx {
         // 0: has_http — excluded (protocol handled separately)
         // 1: has_https — not an indicator
         2 if val >= 4.0 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::UrlLengthAbnormal,
             "URL length abnormal".to_string(),
         )),
         3 if val >= 3.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::DomainLengthAbnormal,
             "Domain length abnormal".to_string(),
         )),
         4 if val == 1.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::IpAddress,
             "Uses IP address instead of domain name".to_string(),
         )),
         5 if val >= 3.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::ExcessiveSubdomains,
             "Excessive subdomain levels".to_string(),
         )),
         7 if val >= 3.0 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::ExcessiveHyphens,
             "Excessive hyphens in URL".to_string(),
         )),
         9 if val >= 1.0 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::AtSymbol,
             "Contains @ symbol (URL obfuscation)".to_string(),
         )),
         10 if val >= 1.0 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::PercentEncoding,
             "High percent-encoding usage".to_string(),
         )),
         14 if val > 0.3 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::HighDigitRatio,
             "High digit-to-character ratio".to_string(),
         )),
-        15 if val >= 3.0 => Some((IndicatorCategory::Path, "Path length abnormal".to_string())),
+        15 if val >= 3.0 => Some((
+            IndicatorCategory::Path,
+            IndicatorGroup::PathLengthAbnormal,
+            "Path length abnormal".to_string(),
+        )),
         18 if val == 1.0 => {
             let keyword = find_sensitive_keyword(url);
             Some((
                 IndicatorCategory::Path,
+                IndicatorGroup::SensitiveKeyword,
                 if let Some(kw) = keyword {
                     format!("Contains sensitive keyword: '{}'", kw)
                 } else {
@@ -278,6 +380,7 @@ fn manual_feature_indicator(
         }
         19 if val >= 0.5 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::DomainImpersonation,
             format!(
                 "Domain closely resembles a known brand (impersonation score {:.2})",
                 val
@@ -285,71 +388,88 @@ fn manual_feature_indicator(
         )),
         20 if val >= 0.7 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::HighEntropySubdomain,
             format!("Random / high-entropy subdomain (entropy {:.2})", val),
         )),
         // --- Structural features (indices 21-38) ---
         21 if val >= 5.0 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::DeepPathStructure,
             format!("Deep path structure ({} levels)", val as i32),
         )),
         22 if val >= 5.0 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::ExcessiveQueryParams,
             format!("Excessive query parameters ({})", val as i32),
         )),
         23 if val == 1.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::ExplicitPort,
             "Explicit port number in URL".to_string(),
         )),
         24 if val >= 1.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::NonStandardPort,
             "Non-standard port number (>= 1000)".to_string(),
         )),
         25 if val > 0.5 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::HighHexRatio,
             format!("High hexadecimal character ratio ({:.2})", val),
         )),
         26 if val < 0.3 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::LowAlphabeticRatio,
             format!("Low alphabetic character ratio ({:.2})", val),
         )),
         27 if val > 0.1 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::HighUppercaseRatio,
             format!("High uppercase ratio (obfuscation) ({:.2})", val),
         )),
         28 if val >= 20.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::LongDomainLabel,
             format!("Abnormally long domain label ({} chars)", val as i32),
         )),
         29 if val >= 5.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::ExcessiveDomainLabels,
             format!("Excessive domain label count ({})", val as i32),
         )),
         30 if val >= 15.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::LongAvgDomainLabel,
             format!("Long average domain label length ({:.1})", val),
         )),
         31 if val > 0.3 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::HighDomainDigitRatio,
             format!("High digit ratio in domain ({:.2})", val),
         )),
         32 if val >= 0.7 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::HighDomainEntropy,
             format!("High domain entropy ({:.2})", val),
         )),
         35 if val == 1.0 => Some((
             IndicatorCategory::Structure,
+            IndicatorGroup::DoubleSlashObfuscation,
             "Double-slash obfuscation in path".to_string(),
         )),
         36 if val == 1.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::TrailingHyphenLabel,
             "Domain label ends with hyphen".to_string(),
         )),
         37 if val == 1.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::LeadingDigitLabel,
             "Domain label starts with digit".to_string(),
         )),
         38 if val == 1.0 => Some((
             IndicatorCategory::Domain,
+            IndicatorGroup::DangerousScheme,
             "Dangerous URL scheme (data:/javascript:)".to_string(),
         )),
         _ => None,
@@ -459,10 +579,10 @@ mod tests {
         let has_ip_indicator = result
             .indicators
             .iter()
-            .any(|i| i.description.contains("IP address"));
+            .any(|i| i.group == IndicatorGroup::IpAddress);
         assert!(
             has_ip_indicator,
-            "IP-based URL should have IP address indicator, got: {:?}",
+            "IP-based URL should have IpAddress group indicator, got: {:?}",
             result.indicators
         );
     }
